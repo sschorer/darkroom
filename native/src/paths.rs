@@ -1,4 +1,4 @@
-//! Single source of truth for the appdata layout (ARCHITECTURE §7.2).
+//! Single source of truth for the appdata layout (ARCHITECTURE §7.2, ADR-013).
 //!
 //! ```text
 //! <app_data_dir>/
