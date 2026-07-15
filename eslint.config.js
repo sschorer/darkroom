@@ -26,6 +26,15 @@ export default tseslint.config(
       "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
     },
   },
+  {
+    // Build scripts run in Node, never in the webview — without this they trip
+    // no-undef on `process` and friends.
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      ecmaVersion: 2022,
+      globals: globals.node,
+    },
+  },
   // Must be last: turns off rules that fight prettier.
   prettier,
 );

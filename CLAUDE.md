@@ -22,6 +22,7 @@ Things that are wrong in ways you can't see from the code:
 
 - **`ci.yml` uses `pull_request`. `pr-vouch.yml` and `pr-title.yml` use `pull_request_target`.** This is deliberate and load-bearing. A `pull_request_target` workflow must never check out or execute PR code — that's a repo takeover. Never "unify" them.
 - **No CI runner has a GPU.** Nothing in CI can generate an image. Green CI ≠ a working model. This constrains every test decision (ADR-010).
+- **`externalBin` breaks `cargo`, not just the bundle.** `native/binaries/uv-<triple>[.exe]` must exist or `tauri-build` fails at compile time — clippy and `cargo test` included. Every `make` target that runs cargo depends on `sidecar`; CI fetches it in each cargo job. The `-<triple>` suffix is Tauri's resolver contract, not our convention.
 - **ComfyUI workflows must be API-format exports** (Settings → dev mode → Save (API Format)). The normal export carries UI layout and `/prompt` rejects it.
 - **`client_id` must be identical** on the WS query string and in the `/prompt` body, or zero progress events arrive and nothing errors.
 - **Never `.with_extension("part")`** in `download.rs` — it drops the real extension and collides for two models sharing a stem. Append instead.

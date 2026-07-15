@@ -46,10 +46,17 @@ install: ## Install JS dependencies
 icon: ## Regenerate app icons from a 1024x1024 source PNG (make icon SRC=path.png)
 	$(PNPM) tauri icon $(SRC)
 
+# Every cargo target below depends on this, not just the bundle: externalBin
+# makes tauri-build fail at compile time when the sidecar is missing. Cheap to
+# repeat — the script no-ops when the pinned version is already there.
+.PHONY: sidecar
+sidecar: ## Fetch the uv sidecar for this host (idempotent; ADR-004)
+	node scripts/fetch-uv.mjs
+
 # ---------------------------------------------------------------- run
 
 .PHONY: dev
-dev: ## Run the app (tauri dev — opens a window)
+dev: sidecar ## Run the app (tauri dev — opens a window)
 	$(PNPM) tauri dev
 
 .PHONY: web
@@ -57,7 +64,7 @@ web: ## Run only the frontend in a browser, no Rust build
 	$(PNPM) dev
 
 .PHONY: build
-build: ## Build the release bundle
+build: sidecar ## Build the release bundle
 	$(PNPM) tauri build
 
 .PHONY: build-web
@@ -65,7 +72,7 @@ build-web: ## Build only the frontend into dist/
 	$(PNPM) build
 
 .PHONY: smoke
-smoke: ## Bundle smoke — must succeed unsigned, or forks can't build
+smoke: sidecar ## Bundle smoke — must succeed unsigned, or forks can't build
 	$(PNPM) tauri build --no-bundle
 
 # ---------------------------------------------------------------- checks
@@ -112,11 +119,11 @@ rust-fmt-fix: ## cargo fmt (writes)
 	cd $(CARGO_DIR) && cargo fmt --all
 
 .PHONY: rust-lint
-rust-lint: ## cargo clippy, warnings are errors
+rust-lint: sidecar ## cargo clippy, warnings are errors
 	cd $(CARGO_DIR) && cargo clippy --all-targets -- -D warnings
 
 .PHONY: rust-test
-rust-test: ## cargo test
+rust-test: sidecar ## cargo test
 	cd $(CARGO_DIR) && cargo test --all-features
 
 # ---------------------------------------------------------------- clean
@@ -126,5 +133,5 @@ clean: ## Remove build output and caches (keeps node_modules and cargo target)
 	rm -rf dist coverage node_modules/.vite
 
 .PHONY: clean-all
-clean-all: clean ## Also remove node_modules and the cargo target dir
-	rm -rf node_modules $(CARGO_DIR)/target
+clean-all: clean ## Also remove node_modules, the cargo target dir, and the sidecar
+	rm -rf node_modules $(CARGO_DIR)/target $(CARGO_DIR)/binaries
