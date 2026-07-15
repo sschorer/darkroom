@@ -95,13 +95,13 @@ Goal: **ADR-005 stops being a theory.** Models become data.
 
 ### #12 · feat(registry): zod schema + types
 **M** · needs #11
-- `src/lib/registry.schema.ts` — the app's runtime contract *and* the CI gate
+- `app/lib/registry.schema.ts` — the app's runtime contract *and* the CI gate
 - Host allowlist, `dest` confinement under `models/`, `tested_on` required
 - **Done:** app and tests share one definition
 
 ### #13 · test(registry): crossCheck validation suite
 **M** · needs #12
-- `tests/registry.test.ts` — params resolve against workflow, API-format detection
+- `registry/registry.test.ts` — params resolve against workflow, API-format detection
 - **Done:** a deliberately broken manifest fails in <10s
 
 ### #14 · feat(registry): flux2-klein manifest + workflow

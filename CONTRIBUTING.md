@@ -91,13 +91,19 @@ Be suspicious of any test design that ignores this. It's the single hardest fact
 Run before pushing:
 
 ```bash
-pnpm lint && pnpm typecheck && pnpm test
-cd src-tauri && cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test
+make check      # everything the table above gates, in one go
+make            # list every target
+make doctor     # what your machine is missing, with the install command
 ```
+
+The commands and their flags live in the `Makefile`. That's deliberate: they
+were previously repeated here, in `CLAUDE.md` and in `ci.yml`, and three
+copies of `cargo clippy -- -D warnings` drift apart until only the CI one is
+true.
 
 ### Registry validation is the important one
 
-`tests/registry.test.ts` validates every manifest — shipped and staged — against the same zod schema the app uses at runtime. One definition, both jobs; if they diverge, the test validates a contract the app doesn't enforce.
+`registry/registry.test.ts` validates every manifest — shipped and staged — against the same zod schema the app uses at runtime. One definition, both jobs; if they diverge, the test validates a contract the app doesn't enforce.
 
 It catches the failure ADR-005 predicts: a manifest whose `params` point at node IDs that don't exist in its workflow. That breakage is invisible until someone hits Generate, and this test finds it in ten seconds without a GPU. It also catches the UI-vs-API export mistake, which otherwise costs you an afternoon.
 

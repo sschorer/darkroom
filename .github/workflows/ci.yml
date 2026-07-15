@@ -63,7 +63,7 @@ jobs:
           components: rustfmt, clippy
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: './src-tauri -> target'
+          workspaces: './native -> target'
           key: ${{ matrix.os }}
 
       - name: Linux deps
@@ -74,11 +74,11 @@ jobs:
             librsvg2-dev patchelf libfuse2 file build-essential curl wget
 
       - run: cargo fmt --all --check
-        working-directory: src-tauri
+        working-directory: native
       - run: cargo clippy --all-targets -- -D warnings
-        working-directory: src-tauri
+        working-directory: native
       - run: cargo test --all-features
-        working-directory: src-tauri
+        working-directory: native
 
   # Proves the thing still bundles. Unsigned, artifacts discarded.
   # Catches "works in dev, explodes in tauri build" before a release tag does.
@@ -98,7 +98,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: './src-tauri -> target'
+          workspaces: './native -> target'
           key: build-${{ matrix.os }}
 
       - name: Linux deps

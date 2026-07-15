@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Baseline capability for the main window. Permissions get added as issues need them, not up front.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

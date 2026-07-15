@@ -39,10 +39,10 @@ reviews:
   path_filters:
     - "!pnpm-lock.yaml"
     - "!Cargo.lock"
-    - "!src-tauri/binaries/**"
+    - "!native/binaries/**"
     # Machine-generated node graphs. An LLM reviewing a 2000-line ComfyUI
     # export produces noise, not insight. Correctness here is enforced by
-    # tests/registry.test.ts (crossCheck) and by human review of the manifest.
+    # registry/registry.test.ts (crossCheck) and by human review of the manifest.
     - "!registry/**/workflow.json"
     - "!**/*.snap"
     - "!dist/**"
@@ -83,7 +83,7 @@ reviews:
         Promotion to a shipped default is a product decision requiring an
         ADR-006 amendment, not a PR.
 
-    - path: "src-tauri/src/download.rs"
+    - path: "native/src/download.rs"
       instructions: >-
         Downloads are 12-16GB and resumable. Watch for:
         (1) `.with_extension("part")` — it truncates the real extension and
@@ -98,7 +98,7 @@ reviews:
         (4) a total request timeout — these run for an hour;
         (5) progress emission must stay throttled; per-chunk `emit` floods IPC.
 
-    - path: "src-tauri/src/sidecar.rs"
+    - path: "native/src/sidecar.rs"
       instructions: >-
         Owns a child process holding several GB of VRAM. Verify:
         (1) teardown exists on ALL of: RunEvent::ExitRequested, the updater's
@@ -111,7 +111,7 @@ reviews:
         (4) PYTHONUNBUFFERED is set, or logs arrive in 4KB lumps and truncate
         exactly when they matter.
 
-    - path: "src/lib/comfy.ts"
+    - path: "app/lib/comfy.ts"
       instructions: >-
         Check that `client_id` is identical on the WebSocket query string and
         in the `/prompt` body — a mismatch silently delivers zero progress
@@ -120,14 +120,14 @@ reviews:
         rather than a bare status code; that field names the failing node and
         is the only actionable diagnostic the user gets.
 
-    - path: "src/lib/workflow.ts"
+    - path: "app/lib/workflow.ts"
       instructions: >-
         `buildWorkflow` must deep-clone before patching (never mutate the
         caller's workflow) and must THROW on a node ID absent from the
         workflow. Silently skipping a missing node lets a stale manifest
         generate garbage — this is the exact failure ADR-005 predicts.
 
-    - path: "src-tauri/tauri.conf.json"
+    - path: "native/tauri.conf.json"
       instructions: >-
         Flag any weakening of CSP. `connect-src` must allow
         http://127.0.0.1:* and ws://127.0.0.1:* because the engine port is

@@ -7,11 +7,14 @@ Tauri 2 desktop app. Generates images and video with AI models running locally o
 ## Commands
 
 ```bash
-pnpm tauri dev                    # run
-pnpm test:registry                # manifest validation — fastest real signal
-pnpm lint && pnpm typecheck && pnpm test
-cd src-tauri && cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test
+make dev                          # run
+make test-registry                # manifest validation — fastest real signal
+make check                        # everything CI gates
+make                              # list every target
 ```
+
+The flags live in the `Makefile` and only there. Don't paste a copy here —
+CI is the only true copy, and a stale one in this file is worse than none.
 
 ## Traps
 
@@ -37,7 +40,7 @@ Things that are wrong in ways you can't see from the code:
 - **Architecture docs are arc42.** New decisions go in `ARCHITECTURE.md` §9 as ADRs with Context / Decision / Rationale / Consequences / Alternatives. An architectural change without an ADR gets re-litigated in six months.
 - **No `.unwrap()`/`.expect()`** on anything reachable from user input, the filesystem, or the network. This is a desktop app: a panic is a window vanishing with no explanation.
 - **Errors must be actionable.** The engine fails in Python, layers from anything the user sees. Surface `node_errors` (it names the failing node) and the engine log tail — never a bare status code.
-- The schema in `src/lib/registry.schema.ts` is both the app's runtime contract and the CI gate. One definition. Don't fork it.
+- The schema in `app/lib/registry.schema.ts` is both the app's runtime contract and the CI gate. One definition. Don't fork it.
 
 <!-- Maintainer note: stripped before injection, costs no context.
      Keep this file under ~100 lines. If you're tempted to add architecture

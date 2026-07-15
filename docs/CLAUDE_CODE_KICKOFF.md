@@ -30,7 +30,7 @@ the merge settings would leave the commit convention unenforced.
 
 TASK 2 — issue #1, chore: scaffold tauri 2 + react + ts.
 Scaffold into this directory (don't nest a new project inside it — the docs,
-.github/, src/lib/registry.schema.ts and tests/ stay where they are).
+.github/, app/lib/registry.schema.ts and registry/ stay where they are).
 - Tauri 2 + React + TypeScript + Tailwind + Vite, pnpm
 - CSP with connect-src http://127.0.0.1:* ws://127.0.0.1:* from the start
 - Version identical in package.json, Cargo.toml, tauri.conf.json
@@ -68,4 +68,4 @@ Useful things to say mid-flight:
 
 **When Claude Code discovers a new trap, put it in CLAUDE.md — not in a comment.** That file compounds: by month three it holds every non-obvious mistake the project has produced, and prevents them for free. It's the same instinct as the ADRs, on a shorter loop.
 
-**One caution.** CLAUDE.md is context, not enforcement — Claude Code reads it and tries to comply, but there's no guarantee. Anything that must hold, encode in CI. That's why `tests/registry.test.ts` exists rather than a line in CLAUDE.md saying "please keep manifests valid."
+**One caution.** CLAUDE.md is context, not enforcement — Claude Code reads it and tries to comply, but there's no guarantee. Anything that must hold, encode in CI. That's why `registry/registry.test.ts` exists rather than a line in CLAUDE.md saying "please keep manifests valid."

@@ -1,0 +1,19 @@
+@import "tailwindcss";
+
+/* It's a darkroom. #31 does the real visual pass; this is just a dark
+   surface to build on rather than a white flash on every launch. */
+@theme {
+  --color-surface: #0b0b0d;
+  --color-safelight: #d94f3d;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background-color: var(--color-surface);
+  color: #e6e6e6;
+}
