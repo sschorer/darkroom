@@ -189,9 +189,9 @@ Goal: **a stranger can install it.**
 **M** · needs #32 — `tauri build --no-bundle`, unsigned must succeed or forks can't build
 ### #34 · build: appimage
 **M** · needs #33 — build on **ubuntu-22.04** (TC-4); bundle WebKitGTK
-### #35 · build: macos dmg ×2 arch
+### #35 · build: macos dmg ×2 arch — filed early as [GH #23](https://github.com/sschorer/darkroom/issues/23)
 **L** · needs #33 — **includes the notarization decision (RISK-2).** $99/yr or ship unsigned with `xattr` docs. Decide before writing code; it changes the updater's behaviour.
-### #36 · build: windows nsis
+### #36 · build: windows nsis — filed early as [GH #24](https://github.com/sschorer/darkroom/issues/24)
 **M** · needs #33
 ### #37 · feat(updater): keys + latest.json + check flow
 **L** · needs #34 #35 #36 — minisign keypair, **offline backup** (RISK-3), defer while queue busy
@@ -230,6 +230,8 @@ Goal: **someone else can contribute.**
 ---
 
 ## Notes
+
+**Numbers in this file are plan numbers, not GitHub issue numbers.** They coincide for #1–#22 (M0+M1, seeded in order). They diverge for anything filed out of sequence: macOS bundling is plan #35 but [GH #23](https://github.com/sschorer/darkroom/issues/23), Windows is plan #36 but [GH #24](https://github.com/sschorer/darkroom/issues/24). When M2 gets seeded its issues will start at GH #25, so the "#23–#31" below means *plan* numbers. Cite `GH #n` when you mean the live issue.
 
 **Order that matters:** #4 before anything else substantial. #11 gates M1. #18 and #39 are the two that get skipped and shouldn't be — they're the tests for bugs that appear an hour later on someone else's machine.
 
