@@ -24,6 +24,15 @@
 // To bump uv: change UV_VERSION, run `node scripts/fetch-uv.mjs --digests`,
 // and paste the printed table over DIGESTS. Review that the digests changed
 // for the reason you expect before committing.
+//
+// ## Flags
+//
+//   --verify   run `uv --version` afterwards and check it (skipped when the
+//              triple isn't this host's — a foreign binary can't be executed)
+//   --target   fetch for another triple instead of this host's
+//   --all      fetch every supported triple
+//   --force    re-fetch even when the pinned version is already present
+//   --digests  print a DIGESTS table for UV_VERSION (see above)
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -64,6 +73,9 @@ const assetName = (triple) => `uv-${triple}${isWindows(triple) ? ".zip" : ".tar.
 const assetUrl = (triple) =>
   `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${assetName(triple)}`;
 
+// What Tauri's externalBin resolver looks for, and the whole point of the script.
+const destPath = (triple) => join(BIN_DIR, `uv-${triple}${isWindows(triple) ? ".exe" : ""}`);
+
 // Throws rather than exiting: process.exit() would skip the `finally` that
 // removes the temp dir, leaking a ~25MB archive on every failed fetch.
 class FetchUvError extends Error {}
@@ -71,12 +83,13 @@ function fail(message) {
   throw new FetchUvError(message);
 }
 
+const hostTripleOrNull = () => HOST_TRIPLES[`${process.platform}-${process.arch}`] ?? null;
+
 function hostTriple() {
-  const key = `${process.platform}-${process.arch}`;
-  const triple = HOST_TRIPLES[key];
+  const triple = hostTripleOrNull();
   if (!triple) {
     fail(
-      `no uv build for this host (${key}).\n` +
+      `no uv build for this host (${process.platform}-${process.arch}).\n` +
         `  Supported: ${Object.values(HOST_TRIPLES).join(", ")}\n` +
         `  Pass --target <triple> to fetch for a different host.`,
     );
@@ -84,15 +97,51 @@ function hostTriple() {
   return triple;
 }
 
+// Node's fetch has no default timeout, so a stalled CDN hangs a build forever
+// rather than failing it. These deadlines cover the body read too, not just the
+// response headers: a connection that opens and then stops sending is the
+// failure that actually happens. The archive deadline is deliberately loose —
+// it exists to break a hang, not to police slow links (~25MB / 10min ≈ 40KB/s).
+const ARCHIVE_TIMEOUT_MS = 10 * 60 * 1000;
+const META_TIMEOUT_MS = 30 * 1000;
+
+async function httpGet(url, timeoutMs) {
+  try {
+    const res = await fetch(url, {
+      redirect: "follow",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) {
+      fail(
+        `GET ${url} returned ${res.status} ${res.statusText}.\n` +
+          `  If this is a 404, UV_VERSION (${UV_VERSION}) may not name a real uv release.`,
+      );
+    }
+    return res;
+  } catch (err) {
+    // Our own failures are already actionable; only translate transport errors.
+    if (err instanceof FetchUvError) throw err;
+    if (err?.name === "TimeoutError") {
+      fail(
+        `GET ${url} timed out after ${timeoutMs / 1000}s.\n` +
+          `  The network stalled or GitHub is unreachable. Retry.`,
+      );
+    }
+    return fail(`GET ${url} failed: ${err.message}`);
+  }
+}
+
 async function download(url) {
-  const res = await fetch(url, { redirect: "follow" });
-  if (!res.ok) {
-    fail(
-      `GET ${url} returned ${res.status} ${res.statusText}.\n` +
-        `  If this is a 404, UV_VERSION (${UV_VERSION}) may not name a real uv release.`,
+  const res = await httpGet(url, ARCHIVE_TIMEOUT_MS);
+  try {
+    return Buffer.from(await res.arrayBuffer());
+  } catch (err) {
+    // The same signal aborts a stalled body mid-read, landing here.
+    return fail(
+      `GET ${url} died mid-download: ${err.message}\n` +
+        `  Retry; the file is verified against a pinned digest either way.`,
     );
   }
-  return Buffer.from(await res.arrayBuffer());
 }
 
 const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
@@ -103,8 +152,7 @@ const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 async function printDigests() {
   const lines = [];
   for (const triple of Object.keys(DIGESTS)) {
-    const res = await fetch(`${assetUrl(triple)}.sha256`, { redirect: "follow" });
-    if (!res.ok) fail(`no .sha256 published for ${assetName(triple)} (${res.status}).`);
+    const res = await httpGet(`${assetUrl(triple)}.sha256`, META_TIMEOUT_MS);
     // Format: "<hex>  <filename>"
     const digest = (await res.text()).trim().split(/\s+/)[0];
     if (!/^[0-9a-f]{64}$/.test(digest)) {
@@ -212,8 +260,38 @@ function extractUv(archive, triple, work) {
   return readFileSync(inner);
 }
 
+// Actually run the thing. A pinned digest proves we downloaded the right bytes;
+// it does not prove they were unpacked into a working executable, and CI has no
+// other step that would notice — externalBin only checks the file exists.
+function verifyRuns(triple) {
+  if (triple !== hostTripleOrNull()) {
+    // A foreign binary can't be executed here; the CI job for that OS covers it.
+    console.log(`fetch-uv: skipping --verify for ${triple} (not this host)`);
+    return;
+  }
+
+  const dest = destPath(triple);
+  let out;
+  try {
+    out = execFileSync(dest, ["--version"], { encoding: "utf8", stdio: "pipe" }).trim();
+  } catch (err) {
+    fail(
+      `the fetched uv did not run: ${err.message}\n` +
+        `  ${dest}\n` +
+        `  The download matched its digest, so suspect extraction, the file mode,\n` +
+        `  or a missing system library.`,
+    );
+  }
+
+  // `uv --version` prints e.g. "uv 0.11.29 (x86_64-unknown-linux-gnu)".
+  if (!out.split(/\s+/).includes(UV_VERSION)) {
+    fail(`sidecar reports "${out}", expected uv ${UV_VERSION}.`);
+  }
+  console.log(`fetch-uv: verified ${out}`);
+}
+
 async function fetchOne(triple, { force }) {
-  const dest = join(BIN_DIR, `uv-${triple}${isWindows(triple) ? ".exe" : ""}`);
+  const dest = destPath(triple);
   const stamp = `${dest}.version`;
 
   // Skip on an exact version match. The stamp is what makes this cheap and
@@ -273,6 +351,7 @@ async function main() {
   }
 
   const force = args.includes("--force");
+  const verify = args.includes("--verify");
   const targetAt = args.indexOf("--target");
   if (targetAt !== -1 && !args[targetAt + 1]) {
     fail("--target needs a triple, e.g. --target x86_64-pc-windows-msvc");
@@ -290,6 +369,9 @@ async function main() {
       fail(`unknown triple "${triple}".\n  Known: ${Object.keys(DIGESTS).join(", ")}`);
     }
     await fetchOne(triple, { force });
+    // Deliberately outside fetchOne: a cached binary should still be proven to
+    // run, or --verify would only ever check the download that just happened.
+    if (verify) verifyRuns(triple);
   }
 }
 

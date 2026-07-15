@@ -50,8 +50,8 @@ icon: ## Regenerate app icons from a 1024x1024 source PNG (make icon SRC=path.pn
 # makes tauri-build fail at compile time when the sidecar is missing. Cheap to
 # repeat — the script no-ops when the pinned version is already there.
 .PHONY: sidecar
-sidecar: ## Fetch the uv sidecar for this host (idempotent; ADR-004)
-	node scripts/fetch-uv.mjs
+sidecar: ## Fetch the uv sidecar for this host and check it runs (idempotent; ADR-004)
+	node scripts/fetch-uv.mjs --verify
 
 # ---------------------------------------------------------------- run
 

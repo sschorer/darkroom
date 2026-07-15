@@ -82,7 +82,11 @@ jobs:
       # Not just the bundle's problem: `externalBin` makes tauri-build fail at
       # compile time if the sidecar is absent, so clippy and test need it too.
       # No pnpm install here — the script is stdlib-only for exactly this reason.
-      - run: node scripts/fetch-uv.mjs
+      #
+      # --verify runs `uv --version`. This matrix is the only place the sidecar
+      # is exercised on all three OSes; without it, an extraction or startup
+      # defect passes CI, because externalBin only checks that a file exists.
+      - run: node scripts/fetch-uv.mjs --verify
 
       - run: cargo fmt --all --check
         working-directory: native
@@ -119,6 +123,8 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
             librsvg2-dev patchelf libfuse2 file build-essential curl wget
 
+      # Plain fetch: the rust matrix above already runs --verify on all three
+      # OSes, and this job only needs the file present to bundle it.
       - run: node scripts/fetch-uv.mjs
       - run: pnpm install --frozen-lockfile
       - run: pnpm tauri build --no-bundle
