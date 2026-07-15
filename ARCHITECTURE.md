@@ -336,15 +336,21 @@ Each matrix job merges its platform key into a single `latest.json` (`includeUpd
 ### 7.2 Target Environment
 
 ```
-<appdata>/darkroom/
+<appdata>/                # app_data_dir(), already qualified by the bundle
+│                        # identifier — no extra darkroom/ segment
 ├── engine/
 │   ├── .venv/          # uv-managed          ~6 GB
+│   │   └── bin/python  # Scripts/python.exe on Windows
 │   ├── ComfyUI/        # pinned SHA, tarball
 │   └── .version        # matches comfy.lock when healthy
 ├── models/             # 12–16 GB per model
 ├── outputs/
 └── darkroom.db         # prompt history, SQLite
 ```
+
+Resolved by `paths.rs` and nowhere else. On Linux that root is
+`~/.local/share/live.darkroom.app`, on macOS `~/Library/Application
+Support/live.darkroom.app`, on Windows `%APPDATA%\live.darkroom.app`.
 
 | Node | Requirement |
 |---|---|
