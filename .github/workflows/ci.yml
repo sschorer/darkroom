@@ -44,6 +44,10 @@ jobs:
         with: { node-version: 20, cache: pnpm }
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
+      # Symmetry with the rust job's `cargo fmt --check`. Without this,
+      # formatting is enforced on one side of the app and not the other, and
+      # `make check` would claim to mirror CI while being stricter than it.
+      - run: pnpm format:check
       - run: pnpm typecheck
       - run: pnpm test:unit --coverage
 

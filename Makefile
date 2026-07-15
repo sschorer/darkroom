@@ -64,10 +64,14 @@ build: ## Build the release bundle
 build-web: ## Build only the frontend into dist/
 	$(PNPM) build
 
+.PHONY: smoke
+smoke: ## Bundle smoke — must succeed unsigned, or forks can't build
+	$(PNPM) tauri build --no-bundle
+
 # ---------------------------------------------------------------- checks
 
 .PHONY: check
-check: lint typecheck test rust-fmt rust-lint rust-test ## Everything CI gates. Run before pushing.
+check: lint fmt-check typecheck test rust-fmt rust-lint rust-test ## Everything CI gates. Run before pushing.
 
 .PHONY: lint
 lint: ## eslint

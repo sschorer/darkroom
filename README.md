@@ -63,7 +63,7 @@ manifest.
 
 ## Layout
 
-```
+```text
 app/        webview side — React, and the registry schema
 native/     everything cargo builds — Tauri, sidecar, downloads
 registry/   model manifests + the suite that validates them

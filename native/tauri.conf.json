@@ -22,7 +22,8 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost blob: data:; media-src 'self' asset: http://asset.localhost blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* ws://127.0.0.1:*"
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost blob: data:; media-src 'self' asset: http://asset.localhost blob:; style-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* ws://127.0.0.1:*",
+      "devCsp": "default-src 'self'; img-src 'self' asset: http://asset.localhost blob: data:; media-src 'self' asset: http://asset.localhost blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* ws://127.0.0.1:*"
     }
   },
   "bundle": {
@@ -37,7 +38,7 @@
     ],
     "licenseFile": "../LICENSE",
     "category": "Graphics",
-    "shortDescription": "Generate images and video on your own GPU.",
-    "longDescription": "Darkroom generates images and video with AI models running entirely on your own GPU, via a bundled ComfyUI engine. No cloud, no account, no upload."
+    "shortDescription": "Local AI image and video generation (in development).",
+    "longDescription": "Darkroom is an early scaffold for a desktop app that will generate images and video with AI models running entirely on the user's own GPU. It does not generate anything yet — no engine and no models are wired up. See the repository for progress."
   }
 }

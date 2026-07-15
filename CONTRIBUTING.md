@@ -82,10 +82,11 @@ Be suspicious of any test design that ignores this. It's the single hardest fact
 
 | Layer | Command | Where | Speed |
 |---|---|---|---|
-| Registry validation | `pnpm test:registry` | CI, every PR | ~10s |
-| Frontend unit | `pnpm test:unit` | CI, every PR | ~5s |
-| Rust unit + integration | `cargo test` | CI, 3 OSes | ~1min |
-| Bundle smoke | `pnpm tauri build --no-bundle` | CI, 3 OSes | ~10min |
+| Registry validation | `make test-registry` | CI, every PR | ~10s |
+| Frontend unit | `make test-unit` | CI, every PR | ~5s |
+| Frontend lint + format + types | `make lint fmt-check typecheck` | CI, every PR | ~15s |
+| Rust fmt + clippy + tests | `make rust-fmt rust-lint rust-test` | CI, 3 OSes | ~1min |
+| Bundle smoke | `make smoke` | CI, 3 OSes | ~10min |
 | **Generation** | manual | **your GPU** | — |
 
 Run before pushing:
@@ -96,10 +97,12 @@ make            # list every target
 make doctor     # what your machine is missing, with the install command
 ```
 
-The commands and their flags live in the `Makefile`. That's deliberate: they
-were previously repeated here, in `CLAUDE.md` and in `ci.yml`, and three
-copies of `cargo clippy -- -D warnings` drift apart until only the CI one is
-true.
+The flags behind those targets live in the `Makefile` and are not repeated in
+this file. That's deliberate: they were previously spelled out here, in
+`CLAUDE.md` and in `ci.yml`, and three copies of
+`cargo clippy -- -D warnings` drift apart until only the CI one is true.
+`ci.yml` still invokes the underlying tools directly — it is the one place
+that has to, and it is the copy that decides whether your PR merges.
 
 ### Registry validation is the important one
 
