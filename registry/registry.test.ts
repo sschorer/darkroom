@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { Manifest, Workflow, crossCheck } from "../src/lib/registry.schema";
+import { Manifest, Workflow, crossCheck } from "../app/lib/registry.schema";
 
-const ROOT = join(__dirname, "..", "registry");
+/** This suite lives in the directory it validates (ADR-012). Non-directory
+ *  entries here — this file, README.md — are skipped by modelDirs(). */
+const ROOT = __dirname;
 
 /** Every model dir, shipped and staged. Staged models are tested too —
  *  otherwise `enabled: true` is a leap of faith rather than a one-line diff. */
@@ -44,14 +46,16 @@ describe("registry", () => {
 
   it("keeps staged models disabled", () => {
     for (const m of models.filter((m) => m.staged)) {
-      const manifest = Manifest.parse(JSON.parse(readFileSync(join(m.dir, "manifest.json"), "utf8")));
+      const manifest = Manifest.parse(
+        JSON.parse(readFileSync(join(m.dir, "manifest.json"), "utf8")),
+      );
       expect(manifest.enabled, `${m.id} is staged but enabled`).toBe(false);
     }
   });
 
   it("has no duplicate ids", () => {
-    const ids = models.map((m) =>
-      Manifest.parse(JSON.parse(readFileSync(join(m.dir, "manifest.json"), "utf8"))).id,
+    const ids = models.map(
+      (m) => Manifest.parse(JSON.parse(readFileSync(join(m.dir, "manifest.json"), "utf8"))).id,
     );
     expect(new Set(ids).size).toBe(ids.length);
   });
@@ -88,8 +92,10 @@ describe.each(models)("registry/$id", ({ id, dir }) => {
   it("declares disk that covers its files", () => {
     const bytes = manifest.files.reduce((a, f) => a + f.size, 0);
     const gb = bytes / 1024 ** 3;
-    expect(manifest.requires.disk_gb, `declares ${manifest.requires.disk_gb}GB, files are ${gb.toFixed(1)}GB`)
-      .toBeGreaterThanOrEqual(gb);
+    expect(
+      manifest.requires.disk_gb,
+      `declares ${manifest.requires.disk_gb}GB, files are ${gb.toFixed(1)}GB`,
+    ).toBeGreaterThanOrEqual(gb);
   });
 
   it("has no duplicate destinations", () => {
@@ -101,8 +107,10 @@ describe.each(models)("registry/$id", ({ id, dir }) => {
     // CI has no GPU. This attestation is the only evidence the model runs
     // at all, so at minimum it has to be self-consistent.
     for (const t of manifest.tested_on) {
-      expect(t.vram_gb, `${t.gpu} has ${t.vram_gb}GB, manifest requires ${manifest.requires.vram_gb}GB`)
-        .toBeGreaterThanOrEqual(manifest.requires.vram_gb);
+      expect(
+        t.vram_gb,
+        `${t.gpu} has ${t.vram_gb}GB, manifest requires ${manifest.requires.vram_gb}GB`,
+      ).toBeGreaterThanOrEqual(manifest.requires.vram_gb);
     }
   });
 });

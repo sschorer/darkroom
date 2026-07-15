@@ -82,22 +82,31 @@ Be suspicious of any test design that ignores this. It's the single hardest fact
 
 | Layer | Command | Where | Speed |
 |---|---|---|---|
-| Registry validation | `pnpm test:registry` | CI, every PR | ~10s |
-| Frontend unit | `pnpm test:unit` | CI, every PR | ~5s |
-| Rust unit + integration | `cargo test` | CI, 3 OSes | ~1min |
-| Bundle smoke | `pnpm tauri build --no-bundle` | CI, 3 OSes | ~10min |
+| Registry validation | `make test-registry` | CI, every PR | ~10s |
+| Frontend unit | `make test-unit` | CI, every PR | ~5s |
+| Frontend lint + format + types | `make lint fmt-check typecheck` | CI, every PR | ~15s |
+| Rust fmt + clippy + tests | `make rust-fmt rust-lint rust-test` | CI, 3 OSes | ~1min |
+| Bundle smoke | `make smoke` | CI, 3 OSes | ~10min |
 | **Generation** | manual | **your GPU** | — |
 
 Run before pushing:
 
 ```bash
-pnpm lint && pnpm typecheck && pnpm test
-cd src-tauri && cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test
+make check      # everything the table above gates, in one go
+make            # list every target
+make doctor     # what your machine is missing, with the install command
 ```
+
+The flags behind those targets live in the `Makefile` and are not repeated in
+this file. That's deliberate: they were previously spelled out here, in
+`CLAUDE.md` and in `ci.yml`, and three copies of
+`cargo clippy -- -D warnings` drift apart until only the CI one is true.
+`ci.yml` still invokes the underlying tools directly — it is the one place
+that has to, and it is the copy that decides whether your PR merges.
 
 ### Registry validation is the important one
 
-`tests/registry.test.ts` validates every manifest — shipped and staged — against the same zod schema the app uses at runtime. One definition, both jobs; if they diverge, the test validates a contract the app doesn't enforce.
+`registry/registry.test.ts` validates every manifest — shipped and staged — against the same zod schema the app uses at runtime. One definition, both jobs; if they diverge, the test validates a contract the app doesn't enforce.
 
 It catches the failure ADR-005 predicts: a manifest whose `params` point at node IDs that don't exist in its workflow. That breakage is invisible until someone hits Generate, and this test finds it in ten seconds without a GPU. It also catches the UI-vs-API export mistake, which otherwise costs you an afternoon.
 

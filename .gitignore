@@ -1,0 +1,20 @@
+node_modules
+dist
+dist-ssr
+coverage
+*.local
+
+# Rust / Tauri
+native/target
+native/gen
+
+# The uv sidecar is fetched per target triple by scripts/fetch-uv.mjs (#2),
+# never committed.
+native/binaries
+
+# Editor
+.DS_Store
+*.swp
+.idea
+.vscode/*
+!.vscode/extensions.json

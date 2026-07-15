@@ -1,0 +1,14 @@
+dist
+coverage
+pnpm-lock.yaml
+native/target
+native/gen
+native/icons
+registry/**/*.json
+
+# Prettier owns code style, not prose. ARCHITECTURE.md is hand-formatted arc42
+# with alignment-sensitive tables, and the workflows use deliberate compact
+# YAML (`with: { version: 9 }`) next to load-bearing comments. Reformatting
+# either produces churn nobody asked for and reviews as noise.
+*.md
+.github/
