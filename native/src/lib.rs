@@ -1,12 +1,17 @@
 use std::io::Write;
 
+pub mod paths;
+
 /// Where a startup failure gets recorded when there is no console to print to.
 ///
 /// `main.rs` sets `windows_subsystem = "windows"` in release, so on Windows
 /// `eprintln!` goes nowhere and the app would vanish with no explanation —
-/// the exact failure CLAUDE.md forbids. appdata is the right home for this and
-/// arrives with paths.rs (#3); until then temp is somewhere a user can be
-/// pointed at.
+/// the exact failure CLAUDE.md forbids.
+///
+/// Deliberately not `paths::Paths` even though appdata would be the tidier
+/// home: this runs when `Builder::run` failed, so there is no `AppHandle` to
+/// resolve appdata from. Temp needs nothing to work, which is the property
+/// that matters for the log that explains why nothing works.
 fn startup_log_path() -> std::path::PathBuf {
     std::env::temp_dir().join("darkroom-startup-error.log")
 }

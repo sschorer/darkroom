@@ -336,15 +336,21 @@ Each matrix job merges its platform key into a single `latest.json` (`includeUpd
 ### 7.2 Target Environment
 
 ```
-<appdata>/darkroom/
+<appdata>/                # app_data_dir(), already qualified by the bundle
+│                        # identifier — no extra darkroom/ segment
 ├── engine/
 │   ├── .venv/          # uv-managed          ~6 GB
+│   │   └── bin/python  # Scripts/python.exe on Windows
 │   ├── ComfyUI/        # pinned SHA, tarball
 │   └── .version        # matches comfy.lock when healthy
 ├── models/             # 12–16 GB per model
 ├── outputs/
 └── darkroom.db         # prompt history, SQLite
 ```
+
+Resolved by `paths.rs` and nowhere else (ADR-013). On Linux that root is
+`~/.local/share/live.darkroom.app`, on macOS `~/Library/Application
+Support/live.darkroom.app`, on Windows `%APPDATA%\live.darkroom.app`.
 
 | Node | Requirement |
 |---|---|
@@ -522,6 +528,17 @@ Under squash-merge the branch's individual commits are discarded, so linting the
 **Rationale:** The Tauri CLI locates `tauri.conf.json` by searching rather than by requiring the literal `src-tauri` name; this was verified with `tauri info` against a renamed directory before any of it was committed, not assumed. `native/` says what is inside it, and avoids `engine/`, which in this project already means the ComfyUI subprocess (ADR-001) — reusing it for the Rust crate would be actively misleading. Making `app/` the Vite root is what lets `index.html` leave the top level.
 **Consequences:** This diverges from every Tauri tutorial and from upstream docs, so a contributor pasting an upstream snippet will reference paths that don't exist; `CONTRIBUTING.md` and `CLAUDE.md` carry the real commands. The path lists in `ci.yml`, `.coderabbit.yaml` and the docs had to move together, and a future path-scoped CodeRabbit rule copied from upstream will silently match nothing — a rule that matches no files fails open, quietly. Vitest projects must re-root at the repo, because Vite's `root` is `app/` and include globs would otherwise resolve under it. Putting the suite inside `registry/` means the lint and format ignores for that directory can no longer be blanket: they are scoped to `registry/**/*.json` so the manifests stay untouched while the suite is still checked — an ignore that swallows a test file is the kind of thing nobody notices for a year.
 **Alternatives:** Keep `src/` + `src-tauri/` (rejected: the scaffold's own instruction, but the names are tooling artifacts and the nested `src` is a papercut every contributor pays); rename only `src-tauri/` (rejected: halves the churn but keeps the asymmetry that caused the objection); a monorepo of `apps/*` + `packages/*` (rejected: one app and one crate — the indirection buys nothing today).
+
+---
+
+### ADR-013 — Appdata root is `app_data_dir()`; `paths.rs` is the only resolver
+
+**Status:** accepted
+**Context:** §7.2 sketched the layout as `<appdata>/darkroom/`. Tauri's `app_data_dir()` already returns a path qualified by the bundle identifier, so reading that sketch literally yields `~/.local/share/live.darkroom.app/darkroom/` — the app nested inside itself. Separately, the layout differs per OS in exactly one place: PEP 405 puts the venv interpreter at `.venv/bin/python` everywhere except Windows, where it is `.venv/Scripts/python.exe`. Every module that touches the engine, the models, the outputs or the database needs these paths, and CI has no GPU (ADR-010), so a path that is wrong on one OS is caught by a unit test or it is not caught until a user reports it.
+**Decision:** The appdata root is `app_data_dir()` verbatim, with no `darkroom/` segment appended; §7.2's tree is corrected to match rather than the code being bent to match the tree. `native/src/paths.rs` is the only place in the codebase that joins a literal segment — `"engine"`, `".venv"`, `"models"` — onto that root. Everything else takes a `Paths` and asks it. `Paths` owns its root and holds no `AppHandle`, and `Paths::new` accepts an arbitrary root. `create_dirs` creates only what Darkroom itself writes (`engine/`, `models/`, `outputs/`), never `.venv/` or `ComfyUI/`.
+**Rationale:** Tauri qualifies `app_data_dir()` by identifier precisely so apps don't collide; re-qualifying it is duplicate work that produces a worse path. Making `paths.rs` the sole resolver is what confines the Windows venv difference to one `#[cfg]` — the alternative isn't "some duplication", it's that the one line differing per OS gets copied into modules whose authors are not thinking about Windows, which is where the bug ships. An owned root rather than a handle means the layout is exercisable against a temp dir in `cargo test`, which is the only way this gets covered at all given ADR-010, and it lets `Paths` cross a thread into the engine bootstrap without dragging Tauri along. `create_dirs` stops short of `.venv/` and `ComfyUI/` because those belong to uv and the tarball, and an empty `.venv/` would make a half-provisioned engine look present to the bootstrap's own existence check.
+**Consequences:** `identifier` in `tauri.conf.json` is now load-bearing, user-visible state: changing it relocates every user's engine, models and outputs, stranding ~20GB and a working install with no migration — TD-5 already records that gap for `darkroom.db`, and this widens it to the whole tree. It should be treated as frozen. The Rust CI matrix cannot be Linux-only, because the interpreter assertion is the one that's wrong on Windows when written on Linux (this is why #3's done-criterion named all three OSes). `Paths::new` taking an arbitrary root is an open door: it exists for tests and a future `--data-dir`, but nothing stops a caller constructing a root of its own and re-forking the layout — the rule is a convention here, not a type.
+**Alternatives:** Append `darkroom/` to match the old sketch (rejected: nests the app inside itself for no gain); let each module join its own paths (rejected: leaks the venv difference into code that never considers Windows); resolve through `AppHandle` at every call site (rejected: couples every consumer to Tauri and makes the layout untestable without a running app); compute the per-OS root ourselves with `dirs` (rejected: reimplements what Tauri already does and drifts from the identifier the bundle actually ships with).
 
 ---
 
