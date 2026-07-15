@@ -1,0 +1,44 @@
+name: Vouch Manage
+
+# Lets maintainers edit VOUCHED.td by commenting on an issue:
+#   vouch @handle
+#   denounce @handle <reason>
+#   unvouch @handle
+#
+# pull-request: true means these open a PR rather than pushing to main.
+# The trust list is the most security-sensitive file in the repo — it should
+# change through the same reviewed path as code. See ADR-009.
+
+on:
+  issue_comment:
+    types: [created]
+
+# Serialize: two concurrent edits to VOUCHED.td would clobber each other.
+concurrency:
+  group: vouch-manage
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  manage:
+    runs-on: ubuntu-24.04
+    # Cheap pre-filter so we don't spin a job on every comment in the repo.
+    if: >
+      contains(github.event.comment.body, 'vouch') ||
+      contains(github.event.comment.body, 'denounce')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mitchellh/vouch/action/manage-by-issue@v1
+        with:
+          repo: ${{ github.repository }}
+          issue-id: ${{ github.event.issue.number }}
+          comment-id: ${{ github.event.comment.id }}
+          pull-request: true
+          dry-run: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

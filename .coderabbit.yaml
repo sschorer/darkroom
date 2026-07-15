@@ -1,0 +1,184 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit reads this file from the BASE branch, so a fork PR cannot edit it
+# to silence review of itself. That's why real enforcement rules live here.
+#
+# Debug with `@coderabbitai configuration` on any PR to see the merged config.
+
+language: en-US
+early_access: false
+
+reviews:
+  # `chill` over `assertive`: most of our PRs are from first-time contributors
+  # packaging models (ADR-009). Nitpick volume drives those people away, and
+  # they are the contribution we most need.
+  profile: chill
+
+  # Never block a merge on the bot. Humans decide; CodeRabbit advises.
+  request_changes_workflow: false
+
+  high_level_summary: true
+  review_status: true
+  collapse_walkthrough: false
+  poem: false # taste call — flip if you want the community flavour
+
+  auto_title_placeholder: "@coderabbitai title"
+  auto_title_instructions: >-
+    Format as a Conventional Commit: "<type>(<scope>): <description>".
+    Type must be one of: feat, fix, docs, style, refactor, perf, test, build,
+    ci, chore, revert. Scope should be one of: registry, engine, sidecar,
+    download, updater, comfy, ui, paths, ci, deps, or omitted.
+    Description: imperative mood, lowercase, no trailing period, under 72 chars.
+    This title becomes the squashed commit message, so it must describe the
+    change's effect on users, not the process of making it.
+
+  auto_review:
+    enabled: true
+    drafts: false # CONTRIBUTING encourages drafts; don't review them
+
+  path_filters:
+    - "!pnpm-lock.yaml"
+    - "!Cargo.lock"
+    - "!src-tauri/binaries/**"
+    # Machine-generated node graphs. An LLM reviewing a 2000-line ComfyUI
+    # export produces noise, not insight. Correctness here is enforced by
+    # tests/registry.test.ts (crossCheck) and by human review of the manifest.
+    - "!registry/**/workflow.json"
+    - "!**/*.snap"
+    - "!dist/**"
+    - "!target/**"
+
+  path_instructions:
+    - path: ".github/workflows/**"
+      instructions: >-
+        SECURITY-CRITICAL. Flag as a blocking issue if:
+        (1) a `pull_request_target` workflow checks out, builds, or executes PR
+        code in any way — this is a repo takeover vector, and pr-vouch.yml must
+        stay free of actions/checkout;
+        (2) ci.yml is switched from `pull_request` to `pull_request_target`;
+        (3) any workflow exposes secrets to a job that runs fork-authored code;
+        (4) `permissions:` is widened beyond what the job needs, or omitted;
+        (5) a third-party action is referenced by a mutable tag where a pinned
+        SHA is warranted for a workflow with write permissions.
+        Do not suggest merging pr-vouch.yml and ci.yml — they are deliberately
+        separate because they need different trust contexts.
+
+    - path: "registry/**/manifest.json"
+      instructions: >-
+        Highest-consequence file type in the repo despite looking like config:
+        a manifest is a download instruction and points at an executable node
+        graph. Verify:
+        (1) `license` is present and plausibly accurate for the named model —
+        FLUX.1-dev and FLUX.2-dev are NON-COMMERCIAL and must say so;
+        (2) `tested_on` is filled with real hardware, a real timing and a real
+        ComfyUI SHA. CI has no GPU, so this attestation is the only evidence
+        the model runs at all;
+        (3) every `files[].url` is https and on an allowlisted host;
+        (4) every `files[].dest` is relative, stays under models/, and contains
+        no `..` segment;
+        (5) `requires.vram_gb` is consistent with the model's real footprint
+        and not optimistic — an understated value produces an OOM crash the
+        user cannot diagnose;
+        (6) new models are added under `_staged/` with `enabled: false`.
+        Promotion to a shipped default is a product decision requiring an
+        ADR-006 amendment, not a PR.
+
+    - path: "src-tauri/src/download.rs"
+      instructions: >-
+        Downloads are 12-16GB and resumable. Watch for:
+        (1) `.with_extension("part")` — it truncates the real extension and
+        collides for two models sharing a stem. Must append instead;
+        (2) resume correctness: if we sent a `Range` header and did NOT get
+        206, the body starts at byte 0 and both the file offset and the hasher
+        state must be reset. HF redirects to a CDN that may ignore Range, and
+        getting this wrong produces a corrupt file that fails its hash an hour
+        later;
+        (3) the SHA-256 must be verified BEFORE the rename to `dest`, since
+        presence of `dest` is treated as proof of validity everywhere else;
+        (4) a total request timeout — these run for an hour;
+        (5) progress emission must stay throttled; per-chunk `emit` floods IPC.
+
+    - path: "src-tauri/src/sidecar.rs"
+      instructions: >-
+        Owns a child process holding several GB of VRAM. Verify:
+        (1) teardown exists on ALL of: RunEvent::ExitRequested, the updater's
+        on_before_exit hook (NSIS terminates us without asking), and a stale
+        PID check at next boot. Missing any one leaks a process that holds the
+        GPU and makes the next launch fail with an unexplainable OOM;
+        (2) the engine binds 127.0.0.1 and never 0.0.0.0;
+        (3) the port stays dynamically allocated — 8188 is very likely taken by
+        the user's own ComfyUI;
+        (4) PYTHONUNBUFFERED is set, or logs arrive in 4KB lumps and truncate
+        exactly when they matter.
+
+    - path: "src/lib/comfy.ts"
+      instructions: >-
+        Check that `client_id` is identical on the WebSocket query string and
+        in the `/prompt` body — a mismatch silently delivers zero progress
+        events. Check that binary WS frames (preview images) are skipped before
+        JSON.parse. Check that a non-2xx from /prompt surfaces `node_errors`
+        rather than a bare status code; that field names the failing node and
+        is the only actionable diagnostic the user gets.
+
+    - path: "src/lib/workflow.ts"
+      instructions: >-
+        `buildWorkflow` must deep-clone before patching (never mutate the
+        caller's workflow) and must THROW on a node ID absent from the
+        workflow. Silently skipping a missing node lets a stale manifest
+        generate garbage — this is the exact failure ADR-005 predicts.
+
+    - path: "src-tauri/tauri.conf.json"
+      instructions: >-
+        Flag any weakening of CSP. `connect-src` must allow
+        http://127.0.0.1:* and ws://127.0.0.1:* because the engine port is
+        dynamic — but setting CSP to null to "make it work" is a blocking
+        issue. Likewise flag capabilities widened to "*" or fs:default.
+        Flag version changes here that aren't mirrored in package.json and
+        Cargo.toml: a mismatch makes the updater compare the wrong number and
+        go silently dead.
+
+    - path: "**/*.rs"
+      instructions: >-
+        Flag `.unwrap()` / `.expect()` on anything reachable from user input,
+        filesystem state or the network. This is a desktop app: a panic is a
+        window vanishing with no explanation. Prefer surfacing the error to
+        the frontend where it can be shown.
+
+    - path: "ARCHITECTURE.md"
+      instructions: >-
+        This is arc42. Check that new decisions are recorded as ADRs in §9 with
+        Context / Decision / Rationale / Consequences / Alternatives, not just
+        as prose elsewhere. If a PR changes architecture without touching this
+        file, say so.
+
+  tools:
+    # ESLint, clippy and rustfmt already run in ci.yml — no point paying twice.
+    eslint:
+      enabled: false
+    markdownlint:
+      enabled: true
+    yamllint:
+      enabled: true
+    actionlint:
+      enabled: true
+    shellcheck:
+      enabled: true
+    gitleaks:
+      enabled: true
+    languagetool:
+      enabled: true
+      language: en-US
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  learnings:
+    scope: local
+  code_guidelines:
+    # The highest-leverage line in this file. CodeRabbit reads these and
+    # reviews against our actual decisions, so it can say "this contradicts
+    # ADR-004" instead of generic advice.
+    filePatterns:
+      - "ARCHITECTURE.md"
+      - "CONTRIBUTING.md"

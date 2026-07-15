@@ -1,0 +1,117 @@
+name: ci
+
+# SECURITY: `pull_request`, never `pull_request_target`. This workflow checks
+# out and executes PR code, so it must run in the fork's context with a
+# read-only token and no secrets. pull_request_target here would be a repo
+# takeover waiting to happen. Trust labelling lives in pr-vouch.yml.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fastest and highest-value job, so it runs first and alone. Catches the
+  # #1 breakage class: a manifest whose node IDs don't match its workflow.
+  # No Rust, no GPU, ~10 seconds.
+  registry:
+    name: Registry validation
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:registry
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test:unit --coverage
+
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # paths.rs and the venv layout differ per OS. Testing only on Linux
+        # means Windows path bugs ship to users.
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          key: ${{ matrix.os }}
+
+      - name: Linux deps
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libfuse2 file build-essential curl wget
+
+      - run: cargo fmt --all --check
+        working-directory: src-tauri
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: src-tauri
+      - run: cargo test --all-features
+        working-directory: src-tauri
+
+  # Proves the thing still bundles. Unsigned, artifacts discarded.
+  # Catches "works in dev, explodes in tauri build" before a release tag does.
+  build:
+    name: Bundle smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: pnpm }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          key: build-${{ matrix.os }}
+
+      - name: Linux deps
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libfuse2 file build-essential curl wget
+
+      - run: node scripts/fetch-uv.mjs
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm tauri build --no-bundle
+        env:
+          # Deliberately no signing key: an unsigned build must succeed, or
+          # forks and contributors can't build the project at all.
+          TAURI_SIGNING_PRIVATE_KEY: ""
