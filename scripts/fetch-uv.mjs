@@ -105,6 +105,14 @@ function hostTriple() {
 const ARCHIVE_TIMEOUT_MS = 10 * 60 * 1000;
 const META_TIMEOUT_MS = 30 * 1000;
 
+// Same reasoning one layer down: execFileSync without a timeout waits forever.
+// Both children are local work on a file we already hold, so a minute is
+// already generous — this is a deadline for a wedged process, not a slow one.
+// Without it a stuck `tar` or a `uv --version` that never returns burns the
+// CI job's entire wall clock and reports a timeout against the whole matrix
+// leg instead of the one line that hung.
+const CHILD_TIMEOUT_MS = 60 * 1000;
+
 async function httpGet(url, timeoutMs) {
   try {
     const res = await fetch(url, {
@@ -242,7 +250,10 @@ function extractUv(archive, triple, work) {
   const archivePath = join(work, assetName(triple));
   writeFileSync(archivePath, archive);
   try {
-    execFileSync("tar", ["-xzf", archivePath, "-C", work], { stdio: "pipe" });
+    execFileSync("tar", ["-xzf", archivePath, "-C", work], {
+      stdio: "pipe",
+      timeout: CHILD_TIMEOUT_MS,
+    });
   } catch (err) {
     fail(
       `could not extract ${assetName(triple)}: ${err.message}\n` +
@@ -273,7 +284,11 @@ function verifyRuns(triple) {
   const dest = destPath(triple);
   let out;
   try {
-    out = execFileSync(dest, ["--version"], { encoding: "utf8", stdio: "pipe" }).trim();
+    out = execFileSync(dest, ["--version"], {
+      encoding: "utf8",
+      stdio: "pipe",
+      timeout: CHILD_TIMEOUT_MS,
+    }).trim();
   } catch (err) {
     fail(
       `the fetched uv did not run: ${err.message}\n` +
@@ -294,21 +309,29 @@ async function fetchOne(triple, { force }) {
   const dest = destPath(triple);
   const stamp = `${dest}.version`;
 
-  // Skip on an exact version match. The stamp is what makes this cheap and
-  // cross-compile-safe: we can't run a foreign binary to ask its version.
-  if (!force && existsSync(dest) && existsSync(stamp)) {
-    if (readFileSync(stamp, "utf8").trim() === UV_VERSION) {
-      console.log(`fetch-uv: uv ${UV_VERSION} already present for ${triple}`);
-      return;
-    }
-  }
-
   const expected = DIGESTS[triple];
   if (!expected) {
     fail(
       `no pinned digest for ${triple}.\n` +
         `  Run \`node scripts/fetch-uv.mjs --digests\` and update DIGESTS in this script.`,
     );
+  }
+
+  // The stamp records the digest, not just the version, because the version
+  // alone doesn't identify what's on disk. uv re-publishing a release under
+  // the same tag changes DIGESTS without touching UV_VERSION, and a
+  // version-only stamp would call the old binary a hit and bundle it — the
+  // exact substitution the digest check downstream exists to catch, silently
+  // skipped because we never got that far. Same story for a corrected pin.
+  const stampValue = `${UV_VERSION} ${expected}`;
+
+  // Skip on an exact match. The stamp is what makes this cheap and
+  // cross-compile-safe: we can't run a foreign binary to ask its version.
+  if (!force && existsSync(dest) && existsSync(stamp)) {
+    if (readFileSync(stamp, "utf8").trim() === stampValue) {
+      console.log(`fetch-uv: uv ${UV_VERSION} already present for ${triple}`);
+      return;
+    }
   }
 
   console.log(`fetch-uv: downloading uv ${UV_VERSION} for ${triple}`);
@@ -334,7 +357,7 @@ async function fetchOne(triple, { force }) {
     // path, and a non-executable sidecar fails at spawn, not at build.
     writeFileSync(dest, uv, { mode: 0o755 });
     // Written last — a stamp only means anything if the binary landed first.
-    writeFileSync(stamp, `${UV_VERSION}\n`);
+    writeFileSync(stamp, `${stampValue}\n`);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
