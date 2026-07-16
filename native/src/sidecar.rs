@@ -20,6 +20,7 @@
 
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use tauri::async_runtime::Receiver;
 use tauri::{AppHandle, Runtime};
@@ -31,6 +32,19 @@ use crate::paths::Paths;
 /// The one interface we ever bind. Passed to `--listen` and used to reserve the
 /// port; anything else would be a mistake, so it lives in one place.
 const LOOPBACK: &str = "127.0.0.1";
+
+/// The route ComfyUI serves once its HTTP server is up. Any response here is
+/// proof of life; the frontend re-reads it for VRAM (ADR-008, §6.2).
+const HEALTH_PATH: &str = "/system_stats";
+
+/// How often to re-probe while the engine is starting.
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// The whole startup budget. ComfyUI's first boot imports torch and every
+/// custom node, which is slow; 120s is generous for that yet short enough that a
+/// genuinely dead engine surfaces as an error rather than an app that hangs
+/// forever (§6.2).
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, thiserror::Error)]
 pub enum SpawnError {
@@ -52,12 +66,27 @@ pub enum SpawnError {
     },
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum HealthError {
+    #[error("could not initialise the HTTP client used to probe the engine: {0}")]
+    Client(#[source] reqwest::Error),
+
+    #[error(
+        "the engine started but never answered on {LOOPBACK}:{port} within {}s.\n  \
+         It is running yet not ready — check the engine log for a Python \
+         traceback; a failing node import is the usual cause.",
+        STARTUP_TIMEOUT.as_secs()
+    )]
+    Timeout { port: u16 },
+}
+
 /// A running engine and the port it was told to serve on.
 ///
 /// Ownership of the process lives here from spawn until teardown. The three
-/// tickets that follow each take one piece: #7 polls [`port`](Self::port) until
-/// the server answers, #8 drains [`events`](Self::events) into the log, and #9
-/// calls [`CommandChild::kill`] on [`child`](Self::child).
+/// tickets that follow each take one piece: [`wait_until_healthy`] polls
+/// [`port`](Self::port) until the server answers, #8 drains
+/// [`events`](Self::events) into the log, and #9 calls [`CommandChild::kill`] on
+/// [`child`](Self::child).
 pub struct Engine {
     /// The loopback port ComfyUI was told to bind. The frontend builds its
     /// engine URL from this (ADR-008).
@@ -104,6 +133,69 @@ pub fn spawn<R: Runtime>(app: &AppHandle<R>, paths: &Paths) -> Result<Engine, Sp
         child,
         events,
     })
+}
+
+/// Waits until the engine on `port` answers, or gives up after [`STARTUP_TIMEOUT`].
+///
+/// [`spawn`] returns the instant the process exists; this is the other half —
+/// the caller turns a spawned handle into a *ready* one by awaiting this before
+/// handing the port to the frontend (§6.2). ComfyUI binds its HTTP server late
+/// in boot, so a response to `/system_stats` is the first moment the port is
+/// worth anything.
+///
+/// Note this watches the socket, not the process: a ComfyUI that dies during
+/// startup simply stops answering and this reports a [`HealthError::Timeout`]
+/// once the budget runs out. The engine log (#8) is where the actual traceback
+/// lands, which is why the error points there.
+pub async fn wait_until_healthy(port: u16) -> Result<(), HealthError> {
+    poll_until_healthy(port, POLL_INTERVAL, STARTUP_TIMEOUT).await
+}
+
+/// The health loop with its cadence and budget injected, so tests can drive it
+/// in milliseconds instead of the two-minute production timeout.
+async fn poll_until_healthy(
+    port: u16,
+    interval: Duration,
+    timeout: Duration,
+) -> Result<(), HealthError> {
+    let url = format!("http://{LOOPBACK}:{port}{HEALTH_PATH}");
+
+    // Built once per engine start, not per probe. Each request carries its own
+    // timeout below rather than a client-wide one, so a probe stuck on a
+    // half-open socket can never outlive the budget that is left.
+    let client = reqwest::Client::builder()
+        .build()
+        .map_err(HealthError::Client)?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        // Everything left in the budget bounds this iteration: no probe or sleep
+        // may run past the deadline, so the total wall time is `timeout`, not
+        // `timeout` plus a trailing probe. When nothing is left, we are done.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(HealthError::Timeout { port });
+        }
+
+        // A wedged socket must not swallow the remaining budget in one try, so
+        // the probe is capped at the poll interval; near the deadline it is
+        // capped tighter still by whatever time is left.
+        let probe = remaining.min(interval);
+
+        // Any successful response means the server is up. Before it binds we get
+        // connection-refused (an `Err`), which is not an outcome to propagate —
+        // it is the expected state on every probe until the last one.
+        if let Ok(res) = client.get(&url).timeout(probe).send().await {
+            if res.status().is_success() {
+                return Ok(());
+            }
+        }
+
+        // Clamp the wait to what remains so we never sleep past the deadline; the
+        // next iteration's check then reports the timeout immediately.
+        let left = deadline.saturating_duration_since(Instant::now());
+        tokio::time::sleep(interval.min(left)).await;
+    }
 }
 
 /// The argument vector for ComfyUI, factored out so the flags are a tested
@@ -198,6 +290,100 @@ mod tests {
         assert_eq!(
             args.first().map(String::as_str),
             Some("/engine/ComfyUI/main.py")
+        );
+    }
+
+    /// Answers one request with a 200, then returns. One reply is all a probe
+    /// needs; `Connection: close` keeps reqwest from holding the socket open and
+    /// waiting on a thread that has already gone home.
+    fn serve_one_ok() -> u16 {
+        use std::io::{Read, Write};
+
+        let listener =
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("stand-in for ComfyUI's server");
+        let port = listener.local_addr().expect("addr").port();
+
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.read(&mut [0u8; 1024]);
+                let body = b"{}";
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body);
+            }
+        });
+
+        port
+    }
+
+    #[test]
+    fn healthy_the_moment_the_endpoint_answers() {
+        let port = serve_one_ok();
+        let result = tauri::async_runtime::block_on(poll_until_healthy(
+            port,
+            Duration::from_millis(20),
+            Duration::from_secs(5),
+        ));
+        assert!(result.is_ok(), "a 200 on /system_stats means ready");
+    }
+
+    /// Accepts connections and holds them open forever without a reply. This is
+    /// the case connection-refused can't reach: the socket is live, so only the
+    /// per-probe timeout keeps a probe from blocking indefinitely.
+    fn serve_silence() -> u16 {
+        let listener =
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("stand-in for a wedged engine");
+        let port = listener.local_addr().expect("addr").port();
+
+        std::thread::spawn(move || {
+            // Hold every accepted socket so it stays open and unanswered.
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(s) => held.push(s),
+                    Err(_) => break,
+                }
+            }
+        });
+
+        port
+    }
+
+    #[test]
+    fn times_out_when_the_socket_answers_but_the_server_never_does() {
+        let port = serve_silence();
+
+        let result = tauri::async_runtime::block_on(poll_until_healthy(
+            port,
+            Duration::from_millis(20),
+            Duration::from_millis(120),
+        ));
+
+        assert!(
+            matches!(result, Err(HealthError::Timeout { port: p }) if p == port),
+            "a live-but-silent engine must time out, not hang, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn times_out_when_nothing_ever_answers() {
+        // A reserved-then-released port: connections are refused, standing in for
+        // an engine that never finishes binding. The budget is milliseconds so
+        // the test times out on purpose without the production two minutes.
+        let dead = free_port().expect("a free port");
+
+        let result = tauri::async_runtime::block_on(poll_until_healthy(
+            dead,
+            Duration::from_millis(5),
+            Duration::from_millis(40),
+        ));
+
+        assert!(
+            matches!(result, Err(HealthError::Timeout { port }) if port == dead),
+            "an engine that never answers must time out on its own port, got {result:?}"
         );
     }
 }
