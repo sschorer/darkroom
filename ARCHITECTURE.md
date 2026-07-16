@@ -347,6 +347,7 @@ Each matrix job merges its platform key into a single `latest.json` (`includeUpd
 │   ├── ComfyUI/        # pinned SHA, tarball
 │   ├── .staging/       # scratch for the unpack; renamed into ComfyUI/
 │   └── .version        # digest of comfy.lock + the torch accelerator found
+├── logs/               # engine.log + rotated backups; Help → Open Logs (#8)
 ├── models/             # 12–16 GB per model
 ├── outputs/
 └── darkroom.db         # prompt history, SQLite

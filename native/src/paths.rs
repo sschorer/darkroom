@@ -9,6 +9,7 @@
 //! │   ├── .venv/          # uv-managed
 //! │   ├── ComfyUI/        # pinned SHA, tarball
 //! │   └── .version        # matches comfy.lock when healthy
+//! ├── logs/               # engine stdout/stderr, rotated (#8)
 //! ├── models/
 //! ├── outputs/
 //! └── darkroom.db
@@ -147,6 +148,22 @@ impl Paths {
         self.engine().join(".version")
     }
 
+    /// Where the engine's stdout/stderr lands (#8).
+    ///
+    /// A sibling of `engine/`, not a child: a reprovision wipes `engine/`, and
+    /// the log of *why* the last run failed is the one thing that must outlive
+    /// the reinstall it prompted. It is also the directory "Help → Open Logs"
+    /// reveals, so it holds the rotated backups alongside the live file.
+    pub fn logs(&self) -> PathBuf {
+        self.root.join("logs")
+    }
+
+    /// The engine's log file. The log pump appends here and rotates it in place;
+    /// its backups are `engine.log.1`, `.2`, … beside it.
+    pub fn engine_log(&self) -> PathBuf {
+        self.logs().join("engine.log")
+    }
+
     /// Downloaded weights. 12–16 GB per model, and never in the repo.
     pub fn models(&self) -> PathBuf {
         self.root.join("models")
@@ -167,7 +184,7 @@ impl Paths {
     /// Not `.venv` or `ComfyUI` — those are uv's and the tarball's to make, and
     /// creating them empty would make a half-provisioned engine look present.
     pub fn create_dirs(&self) -> std::io::Result<()> {
-        for dir in [self.engine(), self.models(), self.outputs()] {
+        for dir in [self.engine(), self.logs(), self.models(), self.outputs()] {
             std::fs::create_dir_all(dir)?;
         }
         Ok(())
@@ -195,6 +212,8 @@ mod tests {
             p.engine_staging(),
             p.engine_tarball(),
             p.engine_version(),
+            p.logs(),
+            p.engine_log(),
             p.uv_home(),
             p.uv_cache(),
             p.uv_python(),
@@ -233,6 +252,8 @@ mod tests {
         assert_eq!(rel(p.engine_staging()), "engine/.staging");
         assert_eq!(rel(p.engine_tarball()), "engine/.comfy.tar.gz");
         assert_eq!(rel(p.engine_version()), "engine/.version");
+        assert_eq!(rel(p.logs()), "logs");
+        assert_eq!(rel(p.engine_log()), "logs/engine.log");
         assert_eq!(rel(p.uv_home()), ".uv");
         assert_eq!(rel(p.uv_cache()), ".uv/cache");
         assert_eq!(rel(p.uv_python()), ".uv/python");
@@ -290,6 +311,7 @@ mod tests {
         p.create_dirs().expect("create_dirs must be idempotent");
 
         assert!(p.engine().is_dir());
+        assert!(p.logs().is_dir());
         assert!(p.models().is_dir());
         assert!(p.outputs().is_dir());
 
