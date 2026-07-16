@@ -69,6 +69,15 @@ pub enum BootstrapError {
         source: tauri_plugin_shell::Error,
     },
 
+    /// Distinct from `Sidecar`: the probe spawns the venv interpreter, not uv,
+    /// so blaming the sidecar here sends a broken-venv report down the wrong
+    /// path (§8.6).
+    #[error("could not run the engine's Python: {source}\n  The venv may be corrupt; reinstalling the engine should fix it.")]
+    Python {
+        #[source]
+        source: tauri_plugin_shell::Error,
+    },
+
     /// The one users actually hit: uv ran and said no.
     #[error("{step} failed (exit {code}).\n\n{tail}")]
     Uv {
@@ -252,7 +261,7 @@ async fn fetch_comfy(paths: &Paths, lock: &Lock) -> Result<(), BootstrapError> {
         .map_err(|source| BootstrapError::Download { url, source })?;
 
     let staging = paths.engine_staging();
-    let tarball = paths.engine().join(".comfy.tar.gz");
+    let tarball = paths.engine_tarball();
     std::fs::write(&tarball, &bytes).map_err(|source| BootstrapError::Io {
         path: tarball.display().to_string(),
         source,
@@ -392,7 +401,7 @@ async fn probe<R: Runtime>(
         .args(["-c", PROBE])
         .output()
         .await
-        .map_err(|source| BootstrapError::Sidecar { source })?;
+        .map_err(|source| BootstrapError::Python { source })?;
 
     if !out.status.success() {
         return Err(BootstrapError::TorchImport {

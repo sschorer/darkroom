@@ -15,7 +15,10 @@ type View =
   | { phase: "checking" }
   | { phase: "idle"; status: EngineStatus }
   | { phase: "installing" }
-  | { phase: "failed"; error: string };
+  // `retry` carries the action that failed, so "Try again" re-runs *that* — a
+  // status-check failure re-checks; an install failure re-installs. Without it
+  // a failed boot check would offer a button that starts a ten-minute install.
+  | { phase: "failed"; error: string; retry: () => void };
 
 export default function App() {
   const [view, setView] = useState<View>({ phase: "checking" });
@@ -24,7 +27,7 @@ export default function App() {
     try {
       setView({ phase: "idle", status: await engineStatus() });
     } catch (e) {
-      setView({ phase: "failed", error: String(e) });
+      setView({ phase: "failed", error: String(e), retry: () => void check() });
     }
   }, []);
 
@@ -42,7 +45,7 @@ export default function App() {
     } catch (e) {
       // Already actionable: the Rust side puts the uv log tail in the message
       // (§8.6). Rendering it verbatim is the point, so it stays pre-wrapped.
-      setView({ phase: "failed", error: String(e) });
+      setView({ phase: "failed", error: String(e), retry: () => void install() });
     }
   }, [check]);
 
@@ -76,7 +79,7 @@ function Engine({ view, onInstall }: { view: View; onInstall: () => void }) {
         <pre className="max-h-80 w-full overflow-auto whitespace-pre-wrap rounded bg-neutral-900 p-3 text-left text-xs text-red-300">
           {view.error}
         </pre>
-        <Button onClick={onInstall}>Try again</Button>
+        <Button onClick={view.retry}>Try again</Button>
       </>
     );
   }

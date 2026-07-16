@@ -213,11 +213,17 @@ impl Lock {
             return Err(bad("repo", &self.repo, "expected owner/name"));
         }
 
-        if self.python.is_empty() || !self.python.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        // `uv venv --python <this>`. A charset check ("digits and dots") is not
+        // enough: it accepts ".", "3.", and "3..12", which reach uv as a version
+        // it can't resolve and fail the provision after the download. Require
+        // dot-separated numeric components, at least major.minor, none empty.
+        let components: Vec<&str> = self.python.split('.').collect();
+        let numeric = |s: &&str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        if components.len() < 2 || !components.iter().all(numeric) {
             return Err(bad(
                 "python",
                 &self.python,
-                "expected a version like 3.12, digits and dots only",
+                "expected a version like 3.12 — numeric major.minor",
             ));
         }
 
@@ -252,11 +258,18 @@ impl Lock {
             ("macos", &self.torch.index_url.macos),
         ] {
             if let Some(url) = url {
-                if !url.starts_with("https://") {
+                // `starts_with("https://")` accepts "https://" with no host, which
+                // reaches uv as an unusable index. Parse it, and require both the
+                // scheme and a nonempty host — the wheels it serves get executed.
+                let parsed = reqwest::Url::parse(url).ok();
+                let ok = parsed.as_ref().is_some_and(|u| {
+                    u.scheme() == "https" && u.host_str().is_some_and(|h| !h.is_empty())
+                });
+                if !ok {
                     return Err(bad(
                         "torch.index_url",
                         &format!("{os}: {url}"),
-                        "must be https — the wheels it serves get executed",
+                        "must be an https URL with a host — the wheels it serves get executed",
                     ));
                 }
             }
@@ -404,19 +417,32 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_plaintext_index_url() {
-        let json = lock_json(
-            GOOD_SHA,
-            "Comfy-Org/ComfyUI",
-            "3.12",
-            "\"http://example.com/w\"",
-        );
-        assert!(Lock::parse(&json).is_err());
+    fn rejects_an_index_url_that_is_not_https_with_a_host() {
+        for index in [
+            "\"http://example.com/w\"",     // plaintext
+            "\"https://\"",                 // scheme but no host — reaches uv unusable
+            "\"download.pytorch.org/whl\"", // no scheme
+            "\"ftp://example.com/w\"",
+        ] {
+            let json = lock_json(GOOD_SHA, "Comfy-Org/ComfyUI", "3.12", index);
+            assert!(
+                Lock::parse(&json).is_err(),
+                "index {index} should have been rejected"
+            );
+        }
     }
 
     #[test]
     fn rejects_a_bogus_python_version() {
-        for python in ["3.12; rm -rf /", "system", ""] {
+        for python in [
+            "3.12; rm -rf /",
+            "system",
+            "",
+            ".",     // charset-only checks let this through
+            "3..12", // empty middle component
+            "3.",    // empty minor
+            "3",     // no minor
+        ] {
             let json = lock_json(GOOD_SHA, "Comfy-Org/ComfyUI", python, "null");
             assert!(
                 Lock::parse(&json).is_err(),

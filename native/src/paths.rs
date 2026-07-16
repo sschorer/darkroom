@@ -110,6 +110,12 @@ impl Paths {
         self.engine().join(".staging")
     }
 
+    /// Where the downloaded tarball lands before it is unpacked. Under `engine/`
+    /// so it shares a filesystem with `.staging`, and removed once unpacked.
+    pub fn engine_tarball(&self) -> PathBuf {
+        self.engine().join(".comfy.tar.gz")
+    }
+
     /// uv's own state, deliberately a sibling of `engine/` rather than a child.
     ///
     /// A reprovision wipes `engine/`. If the wheel cache lived in there it would
@@ -187,6 +193,7 @@ mod tests {
             p.comfy_main(),
             p.comfy_requirements(),
             p.engine_staging(),
+            p.engine_tarball(),
             p.engine_version(),
             p.uv_home(),
             p.uv_cache(),
@@ -224,6 +231,7 @@ mod tests {
             "engine/ComfyUI/requirements.txt"
         );
         assert_eq!(rel(p.engine_staging()), "engine/.staging");
+        assert_eq!(rel(p.engine_tarball()), "engine/.comfy.tar.gz");
         assert_eq!(rel(p.engine_version()), "engine/.version");
         assert_eq!(rel(p.uv_home()), ".uv");
         assert_eq!(rel(p.uv_cache()), ".uv/cache");
