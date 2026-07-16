@@ -3,6 +3,7 @@ use std::io::Write;
 pub mod commands;
 pub mod engine;
 pub mod paths;
+pub mod sidecar;
 
 /// Where a startup failure gets recorded when there is no console to print to.
 ///
