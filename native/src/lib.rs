@@ -47,14 +47,19 @@ fn report_startup_failure(err: &tauri::Error) {
 /// Built on top of [`Menu::default`] rather than from scratch so the standard
 /// entries — Quit, copy/paste, the macOS application menu — all survive;
 /// replacing the menu wholesale to add one item is how those quietly vanish.
-/// Adding the item is best-effort: a Help submenu we can't locate leaves the
-/// default menu intact rather than failing the launch over a log shortcut.
+///
+/// A Help submenu we can't locate is tolerated — the `if let` leaves the default
+/// menu intact rather than failing the launch over a log shortcut. An `append`
+/// that *does* fail, though, is a broken menu subsystem, no different from the
+/// `Menu::default` and `MenuItem::with_id` calls above it: propagate it so a
+/// half-built menu surfaces via `report_startup_failure` instead of launching
+/// with a silently missing item and no diagnostic.
 fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let menu = Menu::default(app)?;
 
     if let Some(MenuItemKind::Submenu(help)) = menu.get(HELP_SUBMENU_ID) {
         let open_logs = MenuItem::with_id(app, OPEN_LOGS_MENU_ID, "Open Logs", true, None::<&str>)?;
-        let _ = help.append(&open_logs);
+        help.append(&open_logs)?;
     }
 
     Ok(menu)
