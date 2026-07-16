@@ -163,9 +163,11 @@ function Progress({ progress }: { progress: EngineProgress | null }) {
         </>
       )}
 
-      {progress?.phase === "installing" && (
+      {progress?.phase === "installing" && progress.line && (
         // The raw uv line. Monospace and single-line so a torch-wheel path
         // that runs long clips rather than reflowing the layout on every event.
+        // Skipped while empty — the phase is announced the instant uv spawns,
+        // before it has said anything, and an empty line would just add a gap.
         <p className="w-full truncate text-center font-mono text-xs text-neutral-500">
           {progress.line}
         </p>

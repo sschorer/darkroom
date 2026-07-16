@@ -58,6 +58,15 @@ const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
 /// and pasting all of it into an IPC payload helps nobody.
 const ERROR_TAIL_LINES: usize = 40;
 
+/// Per-line byte cap for the error tail, and for the line forwarded to the UI.
+///
+/// The line count alone doesn't bound memory: uv splits on newlines, so a
+/// process that emits megabytes without one produces a single enormous "line",
+/// and 40 of those defeat the ring. A uv message worth reading fits comfortably
+/// here; past it the line is clipped, which also keeps a giant line out of the
+/// IPC progress payload.
+const MAX_TAIL_LINE_BYTES: usize = 2 * 1024;
+
 #[derive(Debug, thiserror::Error)]
 pub enum BootstrapError {
     #[error(transparent)]
@@ -537,6 +546,18 @@ async fn uv<R: Runtime>(
         .spawn()
         .map_err(|source| BootstrapError::Sidecar { source })?;
 
+    // Announce the phase the moment uv is running, before its first line. uv can
+    // be quiet for seconds at startup (resolving, or a stalled first request),
+    // and without this the UI would still read `Unpacking` while a venv is being
+    // built. The empty line is filled in as soon as uv says anything.
+    progress::emit(
+        app,
+        Progress::Installing {
+            step,
+            line: String::new(),
+        },
+    );
+
     // Only the last ERROR_TAIL_LINES lines ever reach a user (§8.6), so keep a
     // ring of exactly those rather than buffering a torch build log that runs to
     // megabytes and is then thrown away. The lines are interleaved by arrival:
@@ -557,7 +578,7 @@ async fn uv<R: Runtime>(
                         app,
                         Progress::Installing {
                             step,
-                            line: line.to_owned(),
+                            line: clip(line),
                         },
                     );
                 }
@@ -592,13 +613,33 @@ async fn uv<R: Runtime>(
 
 /// Pushes a line onto the error-tail ring, evicting the oldest past the cap.
 ///
-/// The bound is why a runaway uv log can't grow memory: the ring holds at most
-/// [`ERROR_TAIL_LINES`], which is all [`BootstrapError::Uv`] will ever show.
+/// Two bounds keep a runaway uv log from growing memory: the ring holds at most
+/// [`ERROR_TAIL_LINES`] (all [`BootstrapError::Uv`] will ever show), and each
+/// line is [`clip`]ped so a newline-less megabyte can't ride in as one entry.
 fn push_bounded(recent: &mut VecDeque<String>, line: &str) {
-    recent.push_back(line.to_owned());
+    recent.push_back(clip(line));
     if recent.len() > ERROR_TAIL_LINES {
         recent.pop_front();
     }
+}
+
+/// Truncates a line to [`MAX_TAIL_LINE_BYTES`], on a char boundary, marking a
+/// cut with an ellipsis. Short lines pass through untouched and unallocated
+/// beyond the `to_owned`.
+fn clip(line: &str) -> String {
+    if line.len() <= MAX_TAIL_LINE_BYTES {
+        return line.to_owned();
+    }
+    // Back off to the nearest char boundary at or below the cap — slicing mid
+    // codepoint would panic, and this runs on untrusted subprocess bytes.
+    let mut end = MAX_TAIL_LINE_BYTES;
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut clipped = String::with_capacity(end + '…'.len_utf8());
+    clipped.push_str(&line[..end]);
+    clipped.push('…');
+    clipped
 }
 
 /// uv reports diagnostics on stderr and results on stdout, and a failure can
@@ -816,6 +857,33 @@ mod tests {
         assert_eq!(lines.len(), ERROR_TAIL_LINES);
         assert_eq!(lines.first().map(String::as_str), Some("line 460"));
         assert_eq!(lines.last().map(String::as_str), Some("line 499"));
+    }
+
+    /// The line count alone doesn't bound memory: a newline-less blob arrives as
+    /// one giant "line", so each entry is clipped before it's stored.
+    #[test]
+    fn an_oversized_line_is_clipped_before_it_is_stored() {
+        let mut recent = VecDeque::new();
+        push_bounded(&mut recent, &"x".repeat(10 * MAX_TAIL_LINE_BYTES));
+
+        let stored = &recent[0];
+        assert!(stored.len() <= MAX_TAIL_LINE_BYTES + '…'.len_utf8());
+        assert!(stored.ends_with('…'));
+    }
+
+    /// Clipping runs on untrusted subprocess bytes, so it must never split a
+    /// codepoint — it backs off to the boundary at or below the cap.
+    #[test]
+    fn clipping_never_splits_a_codepoint() {
+        // Multi-byte chars straddling the cap: a naive `[..MAX]` slice panics.
+        let line = "é".repeat(MAX_TAIL_LINE_BYTES);
+        let clipped = clip(&line);
+
+        assert!(clipped.ends_with('…'));
+        assert!(clipped.len() <= MAX_TAIL_LINE_BYTES + '…'.len_utf8());
+        // Valid UTF-8 by construction — the assertions above already prove it
+        // didn't panic, and every retained char is whole.
+        assert!(clipped.trim_end_matches('…').chars().all(|c| c == 'é'));
     }
 
     /// uv puts a resolution failure on stderr and progress on stdout, and which
