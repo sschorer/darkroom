@@ -160,30 +160,41 @@ async fn poll_until_healthy(
 ) -> Result<(), HealthError> {
     let url = format!("http://{LOOPBACK}:{port}{HEALTH_PATH}");
 
-    // Built once per engine start, not per probe. The per-request timeout is the
-    // poll interval: a probe stuck on a half-open socket must not bleed into the
-    // next attempt, or one wedged connection would burn the whole budget on a
-    // single try.
+    // Built once per engine start, not per probe. Each request carries its own
+    // timeout below rather than a client-wide one, so a probe stuck on a
+    // half-open socket can never outlive the budget that is left.
     let client = reqwest::Client::builder()
-        .timeout(interval)
         .build()
         .map_err(HealthError::Client)?;
 
     let deadline = Instant::now() + timeout;
     loop {
+        // Everything left in the budget bounds this iteration: no probe or sleep
+        // may run past the deadline, so the total wall time is `timeout`, not
+        // `timeout` plus a trailing probe. When nothing is left, we are done.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(HealthError::Timeout { port });
+        }
+
+        // A wedged socket must not swallow the remaining budget in one try, so
+        // the probe is capped at the poll interval; near the deadline it is
+        // capped tighter still by whatever time is left.
+        let probe = remaining.min(interval);
+
         // Any successful response means the server is up. Before it binds we get
         // connection-refused (an `Err`), which is not an outcome to propagate —
         // it is the expected state on every probe until the last one.
-        if let Ok(res) = client.get(&url).send().await {
+        if let Ok(res) = client.get(&url).timeout(probe).send().await {
             if res.status().is_success() {
                 return Ok(());
             }
         }
 
-        if Instant::now() >= deadline {
-            return Err(HealthError::Timeout { port });
-        }
-        tokio::time::sleep(interval).await;
+        // Clamp the wait to what remains so we never sleep past the deadline; the
+        // next iteration's check then reports the timeout immediately.
+        let left = deadline.saturating_duration_since(Instant::now());
+        tokio::time::sleep(interval.min(left)).await;
     }
 }
 
@@ -317,6 +328,44 @@ mod tests {
             Duration::from_secs(5),
         ));
         assert!(result.is_ok(), "a 200 on /system_stats means ready");
+    }
+
+    /// Accepts connections and holds them open forever without a reply. This is
+    /// the case connection-refused can't reach: the socket is live, so only the
+    /// per-probe timeout keeps a probe from blocking indefinitely.
+    fn serve_silence() -> u16 {
+        let listener =
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("stand-in for a wedged engine");
+        let port = listener.local_addr().expect("addr").port();
+
+        std::thread::spawn(move || {
+            // Hold every accepted socket so it stays open and unanswered.
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(s) => held.push(s),
+                    Err(_) => break,
+                }
+            }
+        });
+
+        port
+    }
+
+    #[test]
+    fn times_out_when_the_socket_answers_but_the_server_never_does() {
+        let port = serve_silence();
+
+        let result = tauri::async_runtime::block_on(poll_until_healthy(
+            port,
+            Duration::from_millis(20),
+            Duration::from_millis(120),
+        ));
+
+        assert!(
+            matches!(result, Err(HealthError::Timeout { port: p }) if p == port),
+            "a live-but-silent engine must time out, not hang, got {result:?}"
+        );
     }
 
     #[test]
