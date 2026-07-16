@@ -12,19 +12,43 @@
 //!   time, which RISK-8 accepts, and the wheel cache lives outside `engine/`
 //!   precisely so the cost is minutes rather than another 6GB.
 //!
-//! Progress reporting is #5. This runs silently for ten minutes, which is the
-//! known and temporary state of things — the errors are already actionable
-//! (§8.6), the byte counts are not yet anywhere a user can see.
+//! Progress reporting (#5) is push, not poll: each phase emits a [`Progress`] as
+//! it advances, so the ten-minute wait shows bytes and the current uv line
+//! rather than a spinner. The errors stay actionable (§8.6) — a failed step
+//! still returns the log tail; the events are only for the successful path a
+//! user watches.
 
+use std::collections::VecDeque;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime};
+use tauri_plugin_shell::process::CommandEvent;
 use tauri_plugin_shell::ShellExt;
 
 use crate::engine::archive::{self, ArchiveError};
 use crate::engine::lock::{Lock, LockError};
+use crate::engine::progress::{self, Progress};
 use crate::paths::Paths;
+
+/// Emit a download event at most this often, measured in bytes received.
+///
+/// The tarball is small, but the loop still fires once per network chunk. One
+/// event every quarter-megabyte keeps the IPC channel and the React re-render
+/// cheap while staying smooth enough to read as motion.
+const DOWNLOAD_EVENT_STRIDE: u64 = 256 * 1024;
+
+/// Hard ceiling on the ComfyUI download: both what we'll pre-allocate from a
+/// `Content-Length` and how many bytes we'll accept before giving up.
+///
+/// The archive is ~12MB; this sits far above that and far below anything that
+/// threatens memory. One number covers two failure modes with the same shape. A
+/// bogus `Content-Length` must not size a `Vec` large enough to abort the
+/// allocator — an abort is the unexplained-vanish CLAUDE.md forbids on network
+/// input, worse than the `.unwrap()` it isn't. And a mirror that streams without
+/// end — or omits the length and so lies by omission — must hit a wall rather
+/// than grow the buffer until the OS kills the process.
+const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
 
 /// How much engine log to carry into an error message.
 ///
@@ -33,6 +57,15 @@ use crate::paths::Paths;
 /// the tail is the half worth keeping — but a torch build log can be megabytes,
 /// and pasting all of it into an IPC payload helps nobody.
 const ERROR_TAIL_LINES: usize = 40;
+
+/// Per-line byte cap for the error tail, and for the line forwarded to the UI.
+///
+/// The line count alone doesn't bound memory: uv splits on newlines, so a
+/// process that emits megabytes without one produces a single enormous "line",
+/// and 40 of those defeat the ring. A uv message worth reading fits comfortably
+/// here; past it the line is clipped, which also keeps a giant line out of the
+/// IPC progress payload.
+const MAX_TAIL_LINE_BYTES: usize = 2 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BootstrapError {
@@ -62,6 +95,13 @@ pub enum BootstrapError {
 
     #[error("{url} returned {status}.\n  The pinned engine revision may have been withdrawn; this is a bug in Darkroom, not a problem with your machine.")]
     DownloadStatus { url: String, status: u16 },
+
+    #[error(
+        "the ComfyUI download from {url} grew past {limit} bytes and was stopped.\n  \
+         The pinned revision is ~12MB, so a response this large points at a broken \
+         or hostile mirror, not your machine. Nothing has been installed."
+    )]
+    DownloadTooLarge { url: String, limit: u64 },
 
     #[error("could not run the bundled uv: {source}\n  The sidecar is missing or was not permitted to execute.")]
     Sidecar {
@@ -217,11 +257,12 @@ pub async fn provision<R: Runtime>(
     // still be advertising itself as healthy.
     remove_file(&paths.engine_version())?;
 
-    fetch_comfy(paths, lock).await?;
+    fetch_comfy(app, paths, lock).await?;
     create_venv(app, paths, lock).await?;
     install_torch(app, paths, lock).await?;
     install_requirements(app, paths).await?;
 
+    progress::emit(app, Progress::Verifying);
     let installed = probe(app, paths, lock).await?;
 
     // Last, and only now. Everything above is proven.
@@ -235,10 +276,14 @@ pub async fn provision<R: Runtime>(
     Ok(installed)
 }
 
-async fn fetch_comfy(paths: &Paths, lock: &Lock) -> Result<(), BootstrapError> {
+async fn fetch_comfy<R: Runtime>(
+    app: &AppHandle<R>,
+    paths: &Paths,
+    lock: &Lock,
+) -> Result<(), BootstrapError> {
     let url = lock.tarball_url();
 
-    let res = reqwest::get(&url)
+    let mut res = reqwest::get(&url)
         .await
         .map_err(|source| BootstrapError::Download {
             url: url.clone(),
@@ -252,14 +297,49 @@ async fn fetch_comfy(paths: &Paths, lock: &Lock) -> Result<(), BootstrapError> {
         });
     }
 
-    // Held in memory rather than streamed: the archive is ~12MB. #17's weight
-    // downloads are 14GB and stream to a `.part`; this one does not need that
-    // machinery, and pretending it does would be the wrong kind of symmetry.
-    let bytes = res
-        .bytes()
-        .await
-        .map_err(|source| BootstrapError::Download { url, source })?;
+    // Accumulated in memory rather than streamed to disk: the archive is ~12MB.
+    // #17's weight downloads are 14GB and stream to a `.part`; this one does not
+    // need that machinery, and pretending it does would be the wrong symmetry.
+    // The chunk loop (over `bytes()`) exists only to count bytes for #5 — the
+    // buffer is the same whole archive either way.
+    let total = res.content_length();
+    // `total` still feeds the progress bar's denominator; only the allocation is
+    // clamped, so a bogus length degrades to an un-sized buffer rather than an
+    // allocator abort. The loop below is what actually stops a runaway response.
+    let prealloc = total.filter(|&t| t <= MAX_DOWNLOAD_BYTES).unwrap_or(0);
+    let mut bytes: Vec<u8> = Vec::with_capacity(prealloc as usize);
+    let mut received: u64 = 0;
+    let mut last_emitted: u64 = 0;
+    progress::emit(app, Progress::Downloading { received, total });
 
+    while let Some(chunk) = res
+        .chunk()
+        .await
+        .map_err(|source| BootstrapError::Download {
+            url: url.clone(),
+            source,
+        })?
+    {
+        received += chunk.len() as u64;
+        // The prealloc clamp can't catch a missing or under-reported
+        // Content-Length — only counting what actually arrives can. Bound the
+        // buffer here so a mirror can't stream us into an OOM.
+        if received > MAX_DOWNLOAD_BYTES {
+            return Err(BootstrapError::DownloadTooLarge {
+                url: url.clone(),
+                limit: MAX_DOWNLOAD_BYTES,
+            });
+        }
+        bytes.extend_from_slice(&chunk);
+        if received - last_emitted >= DOWNLOAD_EVENT_STRIDE {
+            last_emitted = received;
+            progress::emit(app, Progress::Downloading { received, total });
+        }
+    }
+    // A final event so the bar lands on 100% rather than the last stride short.
+    progress::emit(app, Progress::Downloading { received, total });
+
+    progress::emit(app, Progress::Unpacking);
     let staging = paths.engine_staging();
     let tarball = paths.engine_tarball();
     std::fs::write(&tarball, &bytes).map_err(|source| BootstrapError::Io {
@@ -435,7 +515,11 @@ async fn uv<R: Runtime>(
     step: &'static str,
     args: &[String],
 ) -> Result<(), BootstrapError> {
-    let out = app
+    // Spawned rather than `.output()`d so its lines can be forwarded as they
+    // arrive (#5). The trade is that we buffer the log ourselves for the error
+    // tail, which `.output()` would have handed back whole — but a ten-minute
+    // wait with nothing on screen was the whole problem.
+    let (mut rx, _child) = app
         .shell()
         .sidecar("uv")
         .map_err(|source| BootstrapError::Sidecar { source })?
@@ -446,29 +530,116 @@ async fn uv<R: Runtime>(
         // load-bearing should not be able to change out from under us on a uv
         // bump.
         .env("UV_PYTHON_DOWNLOADS", "automatic")
+        // uv aborts a request after this many seconds of *no progress* (not
+        // total time — a slow-but-steady stream is fine). The 30s default is
+        // tight for a first run pulling ~6GB of CUDA wheels from mirrors like
+        // pypi.nvidia.com that stall mid-stream; uv's three retries then all
+        // trip the same short fuse and the whole step fails on a hiccup. More
+        // slack per attempt turns a transient stall into a pause, not a wall.
+        .env("UV_HTTP_TIMEOUT", "180")
         // Progress bars redraw with carriage returns; captured to a pipe they
-        // become one unreadable line. #5 replaces this with real reporting.
+        // become one unreadable line. We forward uv's milestone lines instead
+        // ("Resolved N packages", "Installed N packages") — real motion without
+        // parsing a redrawn bar.
         .env("UV_NO_PROGRESS", "1")
         .args(args)
-        .output()
-        .await
+        .spawn()
         .map_err(|source| BootstrapError::Sidecar { source })?;
 
-    if !out.status.success() {
+    // Announce the phase the moment uv is running, before its first line. uv can
+    // be quiet for seconds at startup (resolving, or a stalled first request),
+    // and without this the UI would still read `Unpacking` while a venv is being
+    // built. The empty line is filled in as soon as uv says anything.
+    progress::emit(
+        app,
+        Progress::Installing {
+            step,
+            line: String::new(),
+        },
+    );
+
+    // Only the last ERROR_TAIL_LINES lines ever reach a user (§8.6), so keep a
+    // ring of exactly those rather than buffering a torch build log that runs to
+    // megabytes and is then thrown away. The lines are interleaved by arrival:
+    // uv splits its explanation across stdout and stderr, and keeping a failure's
+    // cause next to its effect beats the old stdout-then-stderr split. Each uv
+    // event is already one line (the sidecar reads line by line).
+    let mut recent: VecDeque<String> = VecDeque::with_capacity(ERROR_TAIL_LINES + 1);
+    // `None` until uv terminates. A closed channel with no `Terminated` means a
+    // signal killed the child before it could report — treated as no code.
+    let mut code: Option<i32> = None;
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
+                let text = String::from_utf8_lossy(&bytes);
+                if let Some(line) = text.lines().rev().find(|l| !l.trim().is_empty()) {
+                    progress::emit(
+                        app,
+                        Progress::Installing {
+                            step,
+                            line: clip(line),
+                        },
+                    );
+                }
+                for line in text.lines() {
+                    push_bounded(&mut recent, line);
+                }
+            }
+            // The pipe reader itself failed. Rare, and not a uv exit — record it
+            // in the tail so it shows if the run then fails.
+            CommandEvent::Error(err) => push_bounded(&mut recent, &err),
+            CommandEvent::Terminated(payload) => code = payload.code,
+            // `CommandEvent` is non-exhaustive; a future variant is not a step
+            // outcome and has no business here.
+            _ => {}
+        }
+    }
+
+    if code != Some(0) {
         return Err(BootstrapError::Uv {
             step,
-            code: out
-                .status
-                .code()
+            // No code means a signal killed it; "unknown" is honest, and 0
+            // would be a lie that reads as success.
+            code: code
                 .map(|c| c.to_string())
-                // No code means a signal killed it; "unknown" is honest, and 0
-                // would be a lie that reads as success.
                 .unwrap_or_else(|| "unknown".to_owned()),
-            tail: tail(&combined(&out.stdout, &out.stderr)),
+            tail: Vec::from(recent).join("\n"),
         });
     }
 
     Ok(())
+}
+
+/// Pushes a line onto the error-tail ring, evicting the oldest past the cap.
+///
+/// Two bounds keep a runaway uv log from growing memory: the ring holds at most
+/// [`ERROR_TAIL_LINES`] (all [`BootstrapError::Uv`] will ever show), and each
+/// line is [`clip`]ped so a newline-less megabyte can't ride in as one entry.
+fn push_bounded(recent: &mut VecDeque<String>, line: &str) {
+    recent.push_back(clip(line));
+    if recent.len() > ERROR_TAIL_LINES {
+        recent.pop_front();
+    }
+}
+
+/// Truncates a line to [`MAX_TAIL_LINE_BYTES`], on a char boundary, marking a
+/// cut with an ellipsis. Short lines pass through untouched and unallocated
+/// beyond the `to_owned`.
+fn clip(line: &str) -> String {
+    if line.len() <= MAX_TAIL_LINE_BYTES {
+        return line.to_owned();
+    }
+    // Back off to the nearest char boundary at or below the cap — slicing mid
+    // codepoint would panic, and this runs on untrusted subprocess bytes.
+    let mut end = MAX_TAIL_LINE_BYTES;
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut clipped = String::with_capacity(end + '…'.len_utf8());
+    clipped.push_str(&line[..end]);
+    clipped.push('…');
+    clipped
 }
 
 /// uv reports diagnostics on stderr and results on stdout, and a failure can
@@ -671,6 +842,48 @@ mod tests {
     fn short_output_is_not_truncated() {
         assert_eq!(tail("only line"), "only line");
         assert_eq!(tail(""), "");
+    }
+
+    /// The uv log is now a bounded ring rather than the whole transcript, so the
+    /// same "keep the end" guarantee has to hold at the point the lines go in.
+    #[test]
+    fn the_uv_log_ring_keeps_only_the_last_lines() {
+        let mut recent = VecDeque::new();
+        for i in 0..500 {
+            push_bounded(&mut recent, &format!("line {i}"));
+        }
+
+        let lines = Vec::from(recent);
+        assert_eq!(lines.len(), ERROR_TAIL_LINES);
+        assert_eq!(lines.first().map(String::as_str), Some("line 460"));
+        assert_eq!(lines.last().map(String::as_str), Some("line 499"));
+    }
+
+    /// The line count alone doesn't bound memory: a newline-less blob arrives as
+    /// one giant "line", so each entry is clipped before it's stored.
+    #[test]
+    fn an_oversized_line_is_clipped_before_it_is_stored() {
+        let mut recent = VecDeque::new();
+        push_bounded(&mut recent, &"x".repeat(10 * MAX_TAIL_LINE_BYTES));
+
+        let stored = &recent[0];
+        assert!(stored.len() <= MAX_TAIL_LINE_BYTES + '…'.len_utf8());
+        assert!(stored.ends_with('…'));
+    }
+
+    /// Clipping runs on untrusted subprocess bytes, so it must never split a
+    /// codepoint — it backs off to the boundary at or below the cap.
+    #[test]
+    fn clipping_never_splits_a_codepoint() {
+        // Multi-byte chars straddling the cap: a naive `[..MAX]` slice panics.
+        let line = "é".repeat(MAX_TAIL_LINE_BYTES);
+        let clipped = clip(&line);
+
+        assert!(clipped.ends_with('…'));
+        assert!(clipped.len() <= MAX_TAIL_LINE_BYTES + '…'.len_utf8());
+        // Valid UTF-8 by construction — the assertions above already prove it
+        // didn't panic, and every retained char is whole.
+        assert!(clipped.trim_end_matches('…').chars().all(|c| c == 'é'));
     }
 
     /// uv puts a resolution failure on stderr and progress on stdout, and which
