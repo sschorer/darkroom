@@ -21,9 +21,34 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Runs `uv`. Not for the plugin's JS API — nothing in the frontend is granted a
+# shell permission (capabilities/default.json stays at core:default). It's here
+# because it owns the two things a raw std::process::Command gets wrong: it
+# resolves `uv-<triple>` to the bundled sidecar the way externalBin lays it out,
+# and it sets CREATE_NO_WINDOW so a console doesn't flash on Windows for each of
+# the several children a bootstrap spawns.
+tauri-plugin-shell = "2"
+
+# Fetches the ComfyUI tarball. rustls rather than the platform TLS stack: it
+# keeps the Windows and macOS builds free of an OpenSSL dependency, and the
+# hosts we talk to are ours to pin, not the OS trust store's to negotiate.
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls",
+  "charset",
+  "http2",
+] }
+flate2 = "1"
+tar = "0.4"
+
+# Digests engine/comfy.lock so `.version` can record *which* pin an install
+# came from, not merely which commit. See engine/bootstrap.rs.
+sha2 = "0.10"
+
+thiserror = "2"
+
 [dev-dependencies]
 # paths.rs tests need a real directory to create into; the layout is only
-# proven by touching a filesystem.
+# proven by touching a filesystem. engine/archive.rs builds tarballs into one.
 tempfile = "3"
 
 [profile.release]
