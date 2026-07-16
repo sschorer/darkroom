@@ -40,6 +40,11 @@ reqwest = { version = "0.12", default-features = false, features = [
 flate2 = "1"
 tar = "0.4"
 
+# The health-poll timer (sidecar.rs). tauri already runs on tokio and reqwest
+# needs its reactor; this makes the direct use of `tokio::time` honest rather
+# than reaching through a transitive dependency.
+tokio = { version = "1", features = ["time"] }
+
 # Digests engine/comfy.lock so `.version` can record *which* pin an install
 # came from, not merely which commit. See engine/bootstrap.rs.
 sha2 = "0.10"
