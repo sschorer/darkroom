@@ -39,13 +39,14 @@ Goal: **a hardcoded prompt produces a real image.** No registry, no downloads UI
 - Handles `.venv/bin/python` vs `.venv/Scripts/python.exe`
 - **Done:** unit tests pass on all three OSes in CI
 
-### #4 · feat(engine): bootstrap venv + comfyui from pinned SHA
+### #4 · feat(engine): bootstrap venv + comfyui from pinned SHA ✅
 **L** · needs #2 #3 · **highest risk in the project**
 - `engine/comfy.lock` holds the SHA; fetch via codeload tarball (no git dependency)
 - `uv venv --python 3.12`, `uv pip install -r requirements.txt`
 - Write `.version` on success; compare on boot
 - **Done:** cold machine → working ComfyUI install with torch seeing CUDA
 - ⚠️ Do this second, after #2. It's the assumption everything else rests on.
+- Landed with **ADR-014**: `comfy.lock` is JSON pinning torch per-OS by index (PyPI's Windows torch is CPU-only — the trap the one-line sketch hid, RISK-11), and `.version` compares a digest of the whole lock, not the SHA. macOS resolves to MPS, not CUDA (TD-2). Repo moved to `Comfy-Org/ComfyUI`.
 
 ### #5 · feat(engine): bootstrap progress reporting
 **M** · needs #4

@@ -1,0 +1,15 @@
+{
+  "_comment": "The engine pin (ADR-001, ADR-004, ADR-014). Data, not code: bumping the engine is an edit to this file. Follow the 'Bump the engine' runbook in ARCHITECTURE.md — every registry workflow must be re-tested against a new sha before it lands, because ComfyUI has no API contract (RISK-1) and no CI runner has a GPU (RISK-9).",
+  "repo": "Comfy-Org/ComfyUI",
+  "ref": "v0.28.0",
+  "sha": "700821e1364eaab0e8f21c538a2131719fec57bf",
+  "python": "3.12",
+  "torch": {
+    "packages": ["torch", "torchvision", "torchaudio"],
+    "index_url": {
+      "linux": "https://download.pytorch.org/whl/cu129",
+      "windows": "https://download.pytorch.org/whl/cu129",
+      "macos": null
+    }
+  }
+}

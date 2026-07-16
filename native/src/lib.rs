@@ -1,5 +1,7 @@
 use std::io::Write;
 
+pub mod commands;
+pub mod engine;
 pub mod paths;
 
 /// Where a startup failure gets recorded when there is no console to print to.
@@ -32,9 +34,17 @@ fn report_startup_failure(err: &tauri::Error) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let app = tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .manage(commands::Bootstrapping::default())
+        .invoke_handler(tauri::generate_handler![
+            commands::engine_status,
+            commands::bootstrap_engine
+        ]);
+
     // No `.expect()`: this is a desktop app, and a panic here is a window that
     // never appears with nothing to explain it (CLAUDE.md). Say what broke.
-    if let Err(err) = tauri::Builder::default().run(tauri::generate_context!()) {
+    if let Err(err) = app.run(tauri::generate_context!()) {
         report_startup_failure(&err);
         std::process::exit(1);
     }

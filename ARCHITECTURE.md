@@ -338,11 +338,15 @@ Each matrix job merges its platform key into a single `latest.json` (`includeUpd
 ```
 <appdata>/                # app_data_dir(), already qualified by the bundle
 │                        # identifier — no extra darkroom/ segment
+├── .uv/                # uv's own state, a sibling so a reprovision spares it
+│   ├── cache/          # wheel cache — same fs as .venv, so uv hardlinks
+│   └── python/         # interpreters uv downloaded (ADR-004)
 ├── engine/
 │   ├── .venv/          # uv-managed          ~6 GB
 │   │   └── bin/python  # Scripts/python.exe on Windows
 │   ├── ComfyUI/        # pinned SHA, tarball
-│   └── .version        # matches comfy.lock when healthy
+│   ├── .staging/       # scratch for the unpack; renamed into ComfyUI/
+│   └── .version        # digest of comfy.lock + the torch accelerator found
 ├── models/             # 12–16 GB per model
 ├── outputs/
 └── darkroom.db         # prompt history, SQLite
@@ -542,6 +546,17 @@ Under squash-merge the branch's individual commits are discarded, so linting the
 
 ---
 
+### ADR-014 — `comfy.lock` pins torch per-OS by index, and `.version` compares the whole lock
+
+**Status:** accepted
+**Context:** ADR-004 provisions the engine with `uv`; #4 turned that into code and surfaced two things the ADR's one-line sketch (`uv pip install -r requirements.txt`) hid. First, ComfyUI's own `requirements.txt` lists `torch` **unpinned**. On Linux, PyPI's default `torch` wheel bundles CUDA and works. On Windows, PyPI's default `torch` wheel is **CPU-only** — so the sketched command yields a ComfyUI that installs, imports, renders, and takes ~20 minutes per image with no error anywhere to explain it: a silent failure of Q2 that no GPU-less CI can catch (RISK-9). macOS has had no CUDA build in years and PyTorch's `cu*` indexes carry no macOS wheels at all, so a single global index is wrong for at least one of the three OSes no matter which one you pick. Second, `.version` was described as holding "the SHA"; but changing `torch.index_url` (say cu128→cu129) invalidates every existing venv while leaving the ComfyUI SHA untouched, so a SHA-only comparison would call those installs healthy forever.
+**Decision:** `engine/comfy.lock` is JSON, not a bare SHA. It carries `repo` + `sha` (the codeload source), `python`, and a `torch` block with the package list and a **per-OS `index_url`** (`linux` / `windows` / `macos`, any of them `null` for PyPI). The bootstrap installs torch from that index *before* `requirements.txt`, using `--index-url` (replace PyPI, not `--extra-index-url`) because the `cu*` index self-hosts torch's whole dependency tree and an extra index leaves uv free to prefer PyPI's same-versioned CPU wheel. macOS pins `null`: PyPI's default there is the MPS wheel, which is correct even though MPS is not a supported generation path (TD-2). `.version` records a **sha256 of the entire lock file** (`Lock::digest`), not the SHA, and boot compares that; any edit to the pin forces a reprovision. The lock is compiled in with `include_str!`, so it versions with the app track (§8.2) and a malformed edit is a compile error on our machine rather than a runtime failure on a user's. Every field is validated before it reaches a URL or an argv (40-char lowercase SHA, `owner/name` repo, bare package names, `https` indexes) — the lock ships signed inside the bundle, but a typo in a pin should fail loudly, not fetch from somewhere unintended.
+**Rationale:** The CPU-torch trap is the single highest-consequence failure mode in first-run, it is invisible on the machine that writes the code (Linux), and it is uncatchable in CI (no GPU). Encoding the index as pinned data is what makes the Windows install real and keeps the fix reviewable — the same "model/engine is data" stance as ADR-005. Digesting the whole lock rather than the SHA is the difference between "an engine bump reprovisions" and "an engine bump silently doesn't"; the accelerator torch reports is written into `.version` too, so the UI can tell a CPU install from a CUDA one (Q5) instead of discovering it at render time.
+**Consequences:** `comfy.lock` is now the engine's single pin and the "Bump the engine" runbook edits it, not a SHA file. The `index_url` values track PyTorch's index lifecycle — a retired `cu*` index (they do retire) means a bump, which the digest correctly treats as a reprovision. cu129 was chosen for the initial pin: newest torch while staying on the CUDA 12 driver floor, where cu130 would raise the NVIDIA driver requirement to ~580 and strand users on distro-packaged drivers with an install that bootstraps then fails at import. The engine tarball is the one artifact in the system whose bytes are **not** checked against a pinned hash (§8.4): GitHub's codeload archives are not byte-stable, so the commit SHA in the URL path plus TLS is the integrity claim instead. Bootstrap remains resumable and writes `.version` last (§8.2); nothing here changes that.
+**Alternatives:** Pin an exact torch version/wheel URL per triple like the uv sidecar does (rejected: six triples × every bump, and it duplicates what an index already resolves — the index is the coarser, more maintainable pin); `--extra-index-url` (rejected: lets PyPI's CPU wheel win, the exact bug); one global index (rejected: wrong for macOS, and couples all three OSes to one CUDA choice); compare only the SHA in `.version` (rejected: an index change is a real reprovision it would miss); read the lock from a bundle resource at runtime (rejected: lets the app and engine tracks drift, and turns a bad edit into a user-facing crash instead of a failed build).
+
+---
+
 ## 10. Quality Requirements
 
 ### 10.1 Quality Tree
@@ -593,6 +608,7 @@ Darkroom
 | RISK-8 | Bootstrap re-downloads ~6GB when a version bumps. | Low | Accepted for now. |
 | RISK-9 | **No CI can test generation** (no GPU runners). Green CI does not mean a model works. | High | Registry cross-validation + mock engine + mandatory `tested_on` attestation (ADR-010). Compounds RISK-1: a SHA bump passes CI and breaks every workflow. |
 | RISK-10 | Registry PRs look like config but are download instructions and executable node graphs. | Medium | Schema pins `url` to allowlisted hosts and `dest` under `models/` (§8.4); extra review regardless of vouch label. |
+| RISK-11 | **Silent CPU torch.** ComfyUI's `requirements.txt` pins no torch; PyPI's Windows wheel is CPU-only, so a naive install renders at ~20 min/image with no error — invisible on Linux and uncatchable in CI (RISK-9). | High | Per-OS `torch.index_url` in `comfy.lock`, installed before requirements (ADR-014); the bootstrap probes torch and records the accelerator in `.version` so the UI can say CPU out loud (Q5). |
 
 ### Technical Debt
 
@@ -640,9 +656,9 @@ Darkroom
 4. Promote: move out of `_staged/`, set `"enabled": true`, tag.
 
 **Bump the engine**
-1. Update `engine/comfy.lock` + `requirements.txt`.
+1. Update `engine/comfy.lock`: the new `sha`/`ref`, and `torch.index_url` if the CUDA target moves. `requirements.txt` is not ours — it rides inside the pinned tarball. `comfy.lock` is compiled in (`include_str!`), so a malformed edit fails the build, not a user's first run.
 2. Re-run every registry workflow against the new SHA.
-3. Tag. Clients detect skew and re-bootstrap.
+3. Tag. Clients compare a digest of the whole lock against `.version` and re-bootstrap on any change — including an index change that leaves the SHA alone.
 
 **Cut a release**
 1. Version must match across `package.json`, `Cargo.toml`, `tauri.conf.json`, and the tag — otherwise the updater compares the wrong number and either loops or goes quiet.

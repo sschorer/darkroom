@@ -2,6 +2,9 @@
 //!
 //! ```text
 //! <app_data_dir>/
+//! ├── .uv/                # uv's own state — survives a reprovision
+//! │   ├── cache/          # wheel cache; same filesystem as .venv on purpose
+//! │   └── python/         # interpreters uv downloaded
 //! ├── engine/
 //! │   ├── .venv/          # uv-managed
 //! │   ├── ComfyUI/        # pinned SHA, tarball
@@ -84,6 +87,60 @@ impl Paths {
         self.engine().join("ComfyUI")
     }
 
+    /// ComfyUI's entrypoint. Its presence is what distinguishes a real checkout
+    /// from a directory an interrupted unpack left behind.
+    pub fn comfy_main(&self) -> PathBuf {
+        self.comfy().join("main.py")
+    }
+
+    /// The dependency list the bootstrap installs. Ships inside the tarball, so
+    /// it is pinned by the SHA like everything else in the checkout.
+    pub fn comfy_requirements(&self) -> PathBuf {
+        self.comfy().join("requirements.txt")
+    }
+
+    /// Scratch space for the unpack: the tarball lands here and is expanded
+    /// here, then the result is renamed into `ComfyUI`.
+    ///
+    /// Under `engine/` rather than the OS temp dir so the rename that finishes
+    /// the unpack stays on one filesystem — across filesystems it degrades to a
+    /// copy of ~700MB, and stops being atomic, which is the property that makes
+    /// a `ComfyUI/` directory's presence mean it is whole.
+    pub fn engine_staging(&self) -> PathBuf {
+        self.engine().join(".staging")
+    }
+
+    /// Where the downloaded tarball lands before it is unpacked. Under `engine/`
+    /// so it shares a filesystem with `.staging`, and removed once unpacked.
+    pub fn engine_tarball(&self) -> PathBuf {
+        self.engine().join(".comfy.tar.gz")
+    }
+
+    /// uv's own state, deliberately a sibling of `engine/` rather than a child.
+    ///
+    /// A reprovision wipes `engine/`. If the wheel cache lived in there it would
+    /// go too, and every engine bump would re-download ~6GB of torch (RISK-8)
+    /// instead of relinking it from disk. Keeping it under the appdata root and
+    /// not in `~/.cache` also means it shares a filesystem with `.venv`, which
+    /// is what lets uv hardlink wheels into the venv rather than copying them.
+    pub fn uv_home(&self) -> PathBuf {
+        self.root.join(".uv")
+    }
+
+    /// `UV_CACHE_DIR` — downloaded and unpacked wheels.
+    pub fn uv_cache(&self) -> PathBuf {
+        self.uv_home().join("cache")
+    }
+
+    /// `UV_PYTHON_INSTALL_DIR` — interpreters uv fetched.
+    ///
+    /// ADR-004 promises we never require a system Python; the flip side is that
+    /// uv downloads one, and it belongs under our root where uninstalling the
+    /// app removes it, not in uv's own machine-wide default.
+    pub fn uv_python(&self) -> PathBuf {
+        self.uv_home().join("python")
+    }
+
     /// Records the SHA the engine was provisioned at. Compared against
     /// `engine/comfy.lock` on boot; absent or stale means reprovision.
     pub fn engine_version(&self) -> PathBuf {
@@ -133,7 +190,14 @@ mod tests {
             p.venv(),
             p.python(),
             p.comfy(),
+            p.comfy_main(),
+            p.comfy_requirements(),
+            p.engine_staging(),
+            p.engine_tarball(),
             p.engine_version(),
+            p.uv_home(),
+            p.uv_cache(),
+            p.uv_python(),
             p.models(),
             p.outputs(),
             p.db(),
@@ -161,10 +225,37 @@ mod tests {
         assert_eq!(rel(p.engine()), "engine");
         assert_eq!(rel(p.venv()), "engine/.venv");
         assert_eq!(rel(p.comfy()), "engine/ComfyUI");
+        assert_eq!(rel(p.comfy_main()), "engine/ComfyUI/main.py");
+        assert_eq!(
+            rel(p.comfy_requirements()),
+            "engine/ComfyUI/requirements.txt"
+        );
+        assert_eq!(rel(p.engine_staging()), "engine/.staging");
+        assert_eq!(rel(p.engine_tarball()), "engine/.comfy.tar.gz");
         assert_eq!(rel(p.engine_version()), "engine/.version");
+        assert_eq!(rel(p.uv_home()), ".uv");
+        assert_eq!(rel(p.uv_cache()), ".uv/cache");
+        assert_eq!(rel(p.uv_python()), ".uv/python");
         assert_eq!(rel(p.models()), "models");
         assert_eq!(rel(p.outputs()), "outputs");
         assert_eq!(rel(p.db()), "darkroom.db");
+    }
+
+    // The reason uv_home() is not under engine(): a reprovision deletes the
+    // engine tree, and a wheel cache in there would be deleted with it —
+    // turning every engine bump into a fresh ~6GB torch download (RISK-8).
+    // Nothing else in the code enforces this, so the layout test does.
+    #[test]
+    fn uv_state_survives_an_engine_wipe() {
+        let p = paths();
+
+        assert!(!p.uv_home().starts_with(p.engine()));
+
+        // The other half of the bargain: both under one root means one
+        // filesystem, which is what lets uv hardlink cached wheels into the
+        // venv instead of copying ~6GB of them.
+        assert!(p.uv_cache().starts_with(p.root()));
+        assert!(p.venv().starts_with(p.root()));
     }
 
     // The reason the Rust CI matrix isn't Linux-only: this assertion is the
