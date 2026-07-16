@@ -58,3 +58,22 @@ export type EngineProgress =
  */
 export const onEngineProgress = (cb: (p: EngineProgress) => void): Promise<UnlistenFn> =>
   listen<EngineProgress>("engine://progress", (e) => cb(e.payload));
+
+/**
+ * One captured line of engine output, mirroring `sidecar::LogLine`. `stream`
+ * distinguishes ComfyUI's stdout from the stderr its tracebacks print to, so the
+ * UI can tell an error line from ordinary chatter.
+ */
+export interface EngineLog {
+  stream: "stdout" | "stderr";
+  line: string;
+}
+
+/**
+ * Subscribes to the engine's live log. The same lines are also written to a
+ * rotating file on disk (revealed by Help → Open Logs), so a traceback survives
+ * even with no listener; this is only for showing it as it happens. Resolves to
+ * an unlisten function — call it when the view that shows logs goes away.
+ */
+export const onEngineLog = (cb: (l: EngineLog) => void): Promise<UnlistenFn> =>
+  listen<EngineLog>("engine://log", (e) => cb(e.payload));

@@ -1,9 +1,17 @@
 use std::io::Write;
 
+use tauri::menu::{Menu, MenuItem, MenuItemKind, HELP_SUBMENU_ID};
+use tauri::{AppHandle, Runtime};
+
+use crate::paths::Paths;
+
 pub mod commands;
 pub mod engine;
 pub mod paths;
 pub mod sidecar;
+
+/// The Help-menu item that reveals the engine logs (#8).
+const OPEN_LOGS_MENU_ID: &str = "open-logs";
 
 /// Where a startup failure gets recorded when there is no console to print to.
 ///
@@ -33,10 +41,54 @@ fn report_startup_failure(err: &tauri::Error) {
     }
 }
 
+/// Builds the app menu: the platform default, with an "Open Logs" item added to
+/// its Help submenu (#8).
+///
+/// Built on top of [`Menu::default`] rather than from scratch so the standard
+/// entries — Quit, copy/paste, the macOS application menu — all survive;
+/// replacing the menu wholesale to add one item is how those quietly vanish.
+///
+/// A Help submenu we can't locate is tolerated — the `if let` leaves the default
+/// menu intact rather than failing the launch over a log shortcut. An `append`
+/// that *does* fail, though, is a broken menu subsystem, no different from the
+/// `Menu::default` and `MenuItem::with_id` calls above it: propagate it so a
+/// half-built menu surfaces via `report_startup_failure` instead of launching
+/// with a silently missing item and no diagnostic.
+fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
+    let menu = Menu::default(app)?;
+
+    if let Some(MenuItemKind::Submenu(help)) = menu.get(HELP_SUBMENU_ID) {
+        let open_logs = MenuItem::with_id(app, OPEN_LOGS_MENU_ID, "Open Logs", true, None::<&str>)?;
+        help.append(&open_logs)?;
+    }
+
+    Ok(menu)
+}
+
+/// Reveals the logs directory in the OS file manager when "Open Logs" is chosen.
+///
+/// The directory, not the file: it holds the rotated backups too, and it exists
+/// (we create it) even when the engine has never run to write `engine.log` — so
+/// the menu item is never a dead click. All best-effort; a desktop app must not
+/// panic because a file manager wouldn't open.
+fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: tauri::menu::MenuEvent) {
+    if event.id() != OPEN_LOGS_MENU_ID {
+        return;
+    }
+
+    if let Ok(paths) = Paths::resolve(app) {
+        let logs = paths.logs();
+        let _ = std::fs::create_dir_all(&logs);
+        let _ = open::that_detached(&logs);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .menu(build_menu)
+        .on_menu_event(handle_menu_event)
         .manage(commands::Bootstrapping::default())
         .invoke_handler(tauri::generate_handler![
             commands::engine_status,

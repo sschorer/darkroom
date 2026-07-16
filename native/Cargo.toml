@@ -40,6 +40,12 @@ reqwest = { version = "0.12", default-features = false, features = [
 flate2 = "1"
 tar = "0.4"
 
+# Opens the logs directory from the Help menu with the OS file manager. Already
+# in the tree via tauri-plugin-shell; named here because we call it directly
+# rather than through the shell plugin's `open`, which is deprecated (and so a
+# clippy `-D warnings` failure) in favour of exactly this.
+open = "5"
+
 # The health-poll timer (sidecar.rs). tauri already runs on tokio and reqwest
 # needs its reactor; this makes the direct use of `tokio::time` honest rather
 # than reaching through a transitive dependency.
