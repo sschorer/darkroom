@@ -54,3 +54,67 @@ pub enum Progress {
 pub fn emit<R: Runtime>(app: &AppHandle<R>, progress: Progress) {
     let _ = app.emit(EVENT, progress);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // `EngineProgress` in app/lib/engine.ts is a hand-kept mirror of this enum
+    // (that file says as much). These pin the wire shape so a serde tag change,
+    // a `rename_all` slip, or a renamed field fails a test here rather than
+    // silently breaking the progress UI at runtime — the same guard
+    // `the_probe_output_shape_is_the_one_we_parse` gives the probe.
+
+    #[test]
+    fn downloading_carries_phase_and_byte_fields() {
+        assert_eq!(
+            serde_json::to_value(Progress::Downloading {
+                received: 12,
+                total: Some(48),
+            })
+            .expect("serialize"),
+            json!({ "phase": "downloading", "received": 12, "total": 48 }),
+        );
+    }
+
+    #[test]
+    fn a_missing_content_length_serializes_total_as_null() {
+        assert_eq!(
+            serde_json::to_value(Progress::Downloading {
+                received: 12,
+                total: None,
+            })
+            .expect("serialize"),
+            json!({ "phase": "downloading", "received": 12, "total": null }),
+        );
+    }
+
+    #[test]
+    fn the_byteless_phases_are_bare_tags() {
+        assert_eq!(
+            serde_json::to_value(Progress::Unpacking).expect("serialize"),
+            json!({ "phase": "unpacking" }),
+        );
+        assert_eq!(
+            serde_json::to_value(Progress::Verifying).expect("serialize"),
+            json!({ "phase": "verifying" }),
+        );
+    }
+
+    #[test]
+    fn installing_carries_step_and_line() {
+        assert_eq!(
+            serde_json::to_value(Progress::Installing {
+                step: "installing PyTorch",
+                line: "Resolved 33 packages".to_owned(),
+            })
+            .expect("serialize"),
+            json!({
+                "phase": "installing",
+                "step": "installing PyTorch",
+                "line": "Resolved 33 packages",
+            }),
+        );
+    }
+}

@@ -50,22 +50,28 @@ export default function App() {
   const install = useCallback(async () => {
     setView({ phase: "installing", progress: null });
 
-    // Subscribe before invoking: the events fire during the command, which only
-    // resolves at the very end. The functional update ignores events that land
-    // after we've left the installing phase (a late one racing a failure).
-    const unlisten = await onEngineProgress((p) =>
-      setView((v) => (v.phase === "installing" ? { phase: "installing", progress: p } : v)),
-    );
-
     try {
-      await bootstrapEngine();
-      await check();
+      // Subscribe before invoking: the events fire during the command, which
+      // resolves only at the very end. Inside the try so a `listen()` that
+      // itself rejects lands on the failed view like any other setup error —
+      // outside it, that rejection would throw past the caller's `void
+      // install()` and leave "installing" on screen forever, the exact hang
+      // this feature exists to kill. The functional update ignores events that
+      // arrive after we've left the installing phase (a late one racing a
+      // failure).
+      const unlisten = await onEngineProgress((p) =>
+        setView((v) => (v.phase === "installing" ? { phase: "installing", progress: p } : v)),
+      );
+      try {
+        await bootstrapEngine();
+        await check();
+      } finally {
+        unlisten();
+      }
     } catch (e) {
       // Already actionable: the Rust side puts the uv log tail in the message
       // (§8.6). Rendering it verbatim is the point, so it stays pre-wrapped.
       setView({ phase: "failed", error: String(e), retry: () => void install() });
-    } finally {
-      unlisten();
     }
   }, [check]);
 

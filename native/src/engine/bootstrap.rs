@@ -37,6 +37,16 @@ use crate::paths::Paths;
 /// cheap while staying smooth enough to read as motion.
 const DOWNLOAD_EVENT_STRIDE: u64 = 256 * 1024;
 
+/// Cap on how much tarball buffer we pre-allocate from `Content-Length`.
+///
+/// The archive is ~12MB. Pre-sizing a `Vec` directly off a server-reported
+/// length is an allocator abort waiting for a misbehaving mirror — and an abort
+/// is the unexplained-vanish CLAUDE.md forbids on network input, worse than the
+/// `.unwrap()` it isn't. Above this the header is treated as untrusted and the
+/// buffer grows on demand; the contents are identical either way, so the only
+/// cost past the cap is a reallocation or two.
+const MAX_DOWNLOAD_PREALLOC: u64 = 128 * 1024 * 1024;
+
 /// How much engine log to carry into an error message.
 ///
 /// §8.6: a spawn failure must surface the tail of the log, not a status code. A
@@ -274,7 +284,10 @@ async fn fetch_comfy<R: Runtime>(
     // The chunk loop (over `bytes()`) exists only to count bytes for #5 — the
     // buffer is the same whole archive either way.
     let total = res.content_length();
-    let mut bytes: Vec<u8> = Vec::with_capacity(total.unwrap_or(0) as usize);
+    // `total` still feeds the progress bar's denominator; only the allocation is
+    // clamped, so a bogus length degrades to an un-sized buffer, not a crash.
+    let prealloc = total.filter(|&t| t <= MAX_DOWNLOAD_PREALLOC).unwrap_or(0);
+    let mut bytes: Vec<u8> = Vec::with_capacity(prealloc as usize);
     let mut received: u64 = 0;
     let mut last_emitted: u64 = 0;
     progress::emit(app, Progress::Downloading { received, total });
