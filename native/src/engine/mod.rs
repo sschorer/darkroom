@@ -10,8 +10,9 @@
 //!             engine/.version   written last; presence means healthy
 //! ```
 //!
-//! Spawning the engine and talking to it are #6 onwards. This module stops at
-//! "an interpreter exists that can import torch".
+//! Spawning that interpreter as a running server is [`crate::sidecar`]; talking
+//! to it is #10 onwards. This module stops at "an interpreter exists that can
+//! import torch".
 
 pub mod archive;
 pub mod bootstrap;
