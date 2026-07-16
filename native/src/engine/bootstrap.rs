@@ -12,19 +12,30 @@
 //!   time, which RISK-8 accepts, and the wheel cache lives outside `engine/`
 //!   precisely so the cost is minutes rather than another 6GB.
 //!
-//! Progress reporting is #5. This runs silently for ten minutes, which is the
-//! known and temporary state of things — the errors are already actionable
-//! (§8.6), the byte counts are not yet anywhere a user can see.
+//! Progress reporting (#5) is push, not poll: each phase emits a [`Progress`] as
+//! it advances, so the ten-minute wait shows bytes and the current uv line
+//! rather than a spinner. The errors stay actionable (§8.6) — a failed step
+//! still returns the log tail; the events are only for the successful path a
+//! user watches.
 
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime};
+use tauri_plugin_shell::process::CommandEvent;
 use tauri_plugin_shell::ShellExt;
 
 use crate::engine::archive::{self, ArchiveError};
 use crate::engine::lock::{Lock, LockError};
+use crate::engine::progress::{self, Progress};
 use crate::paths::Paths;
+
+/// Emit a download event at most this often, measured in bytes received.
+///
+/// The tarball is small, but the loop still fires once per network chunk. One
+/// event every quarter-megabyte keeps the IPC channel and the React re-render
+/// cheap while staying smooth enough to read as motion.
+const DOWNLOAD_EVENT_STRIDE: u64 = 256 * 1024;
 
 /// How much engine log to carry into an error message.
 ///
@@ -217,11 +228,12 @@ pub async fn provision<R: Runtime>(
     // still be advertising itself as healthy.
     remove_file(&paths.engine_version())?;
 
-    fetch_comfy(paths, lock).await?;
+    fetch_comfy(app, paths, lock).await?;
     create_venv(app, paths, lock).await?;
     install_torch(app, paths, lock).await?;
     install_requirements(app, paths).await?;
 
+    progress::emit(app, Progress::Verifying);
     let installed = probe(app, paths, lock).await?;
 
     // Last, and only now. Everything above is proven.
@@ -235,10 +247,14 @@ pub async fn provision<R: Runtime>(
     Ok(installed)
 }
 
-async fn fetch_comfy(paths: &Paths, lock: &Lock) -> Result<(), BootstrapError> {
+async fn fetch_comfy<R: Runtime>(
+    app: &AppHandle<R>,
+    paths: &Paths,
+    lock: &Lock,
+) -> Result<(), BootstrapError> {
     let url = lock.tarball_url();
 
-    let res = reqwest::get(&url)
+    let mut res = reqwest::get(&url)
         .await
         .map_err(|source| BootstrapError::Download {
             url: url.clone(),
@@ -252,14 +268,36 @@ async fn fetch_comfy(paths: &Paths, lock: &Lock) -> Result<(), BootstrapError> {
         });
     }
 
-    // Held in memory rather than streamed: the archive is ~12MB. #17's weight
-    // downloads are 14GB and stream to a `.part`; this one does not need that
-    // machinery, and pretending it does would be the wrong kind of symmetry.
-    let bytes = res
-        .bytes()
-        .await
-        .map_err(|source| BootstrapError::Download { url, source })?;
+    // Accumulated in memory rather than streamed to disk: the archive is ~12MB.
+    // #17's weight downloads are 14GB and stream to a `.part`; this one does not
+    // need that machinery, and pretending it does would be the wrong symmetry.
+    // The chunk loop (over `bytes()`) exists only to count bytes for #5 — the
+    // buffer is the same whole archive either way.
+    let total = res.content_length();
+    let mut bytes: Vec<u8> = Vec::with_capacity(total.unwrap_or(0) as usize);
+    let mut received: u64 = 0;
+    let mut last_emitted: u64 = 0;
+    progress::emit(app, Progress::Downloading { received, total });
 
+    while let Some(chunk) = res
+        .chunk()
+        .await
+        .map_err(|source| BootstrapError::Download {
+            url: url.clone(),
+            source,
+        })?
+    {
+        received += chunk.len() as u64;
+        bytes.extend_from_slice(&chunk);
+        if received - last_emitted >= DOWNLOAD_EVENT_STRIDE {
+            last_emitted = received;
+            progress::emit(app, Progress::Downloading { received, total });
+        }
+    }
+    // A final event so the bar lands on 100% rather than the last stride short.
+    progress::emit(app, Progress::Downloading { received, total });
+
+    progress::emit(app, Progress::Unpacking);
     let staging = paths.engine_staging();
     let tarball = paths.engine_tarball();
     std::fs::write(&tarball, &bytes).map_err(|source| BootstrapError::Io {
@@ -435,7 +473,11 @@ async fn uv<R: Runtime>(
     step: &'static str,
     args: &[String],
 ) -> Result<(), BootstrapError> {
-    let out = app
+    // Spawned rather than `.output()`d so its lines can be forwarded as they
+    // arrive (#5). The trade is that we buffer the log ourselves for the error
+    // tail, which `.output()` would have handed back whole — but a ten-minute
+    // wait with nothing on screen was the whole problem.
+    let (mut rx, _child) = app
         .shell()
         .sidecar("uv")
         .map_err(|source| BootstrapError::Sidecar { source })?
@@ -446,25 +488,71 @@ async fn uv<R: Runtime>(
         // load-bearing should not be able to change out from under us on a uv
         // bump.
         .env("UV_PYTHON_DOWNLOADS", "automatic")
+        // uv aborts a request after this many seconds of *no progress* (not
+        // total time — a slow-but-steady stream is fine). The 30s default is
+        // tight for a first run pulling ~6GB of CUDA wheels from mirrors like
+        // pypi.nvidia.com that stall mid-stream; uv's three retries then all
+        // trip the same short fuse and the whole step fails on a hiccup. More
+        // slack per attempt turns a transient stall into a pause, not a wall.
+        .env("UV_HTTP_TIMEOUT", "180")
         // Progress bars redraw with carriage returns; captured to a pipe they
-        // become one unreadable line. #5 replaces this with real reporting.
+        // become one unreadable line. We forward uv's milestone lines instead
+        // ("Resolved N packages", "Installed N packages") — real motion without
+        // parsing a redrawn bar.
         .env("UV_NO_PROGRESS", "1")
         .args(args)
-        .output()
-        .await
+        .spawn()
         .map_err(|source| BootstrapError::Sidecar { source })?;
 
-    if !out.status.success() {
+    // The whole run, in the order it was printed. uv splits its explanation
+    // across stdout and stderr, so interleaving by arrival keeps a failure's
+    // cause next to its effect — better ordering for a tail than the old
+    // stdout-then-stderr split.
+    let mut log = String::new();
+    // `None` until uv terminates. A closed channel with no `Terminated` means a
+    // signal killed the child before it could report — treated as no code.
+    let mut code: Option<i32> = None;
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
+                let text = String::from_utf8_lossy(&bytes);
+                if let Some(line) = text.lines().rev().find(|l| !l.trim().is_empty()) {
+                    progress::emit(
+                        app,
+                        Progress::Installing {
+                            step,
+                            line: line.to_owned(),
+                        },
+                    );
+                }
+                log.push_str(&text);
+                if !text.ends_with('\n') {
+                    log.push('\n');
+                }
+            }
+            // The pipe reader itself failed. Rare, and not a uv exit — record it
+            // in the log so the tail can show it if the run then fails.
+            CommandEvent::Error(err) => {
+                log.push_str(&err);
+                log.push('\n');
+            }
+            CommandEvent::Terminated(payload) => code = payload.code,
+            // `CommandEvent` is non-exhaustive; a future variant is not a step
+            // outcome and has no business here.
+            _ => {}
+        }
+    }
+
+    if code != Some(0) {
         return Err(BootstrapError::Uv {
             step,
-            code: out
-                .status
-                .code()
+            // No code means a signal killed it; "unknown" is honest, and 0
+            // would be a lie that reads as success.
+            code: code
                 .map(|c| c.to_string())
-                // No code means a signal killed it; "unknown" is honest, and 0
-                // would be a lie that reads as success.
                 .unwrap_or_else(|| "unknown".to_owned()),
-            tail: tail(&combined(&out.stdout, &out.stderr)),
+            tail: tail(&log),
         });
     }
 

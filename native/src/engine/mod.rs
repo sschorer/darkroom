@@ -16,6 +16,8 @@
 pub mod archive;
 pub mod bootstrap;
 pub mod lock;
+pub mod progress;
 
 pub use bootstrap::{provision, status, Accelerator, BootstrapError, Installed, Status};
 pub use lock::Lock;
+pub use progress::Progress;

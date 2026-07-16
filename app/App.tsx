@@ -4,17 +4,27 @@
  *
  * The setup button exists because #4's done-criterion is "cold machine to
  * working ComfyUI", and nothing can demonstrate that if nothing invokes it. It
- * is not the onboarding flow (#29) and the ten-minute wait has no progress
- * behind it (#5) — both are deliberately out of scope here.
+ * is not the onboarding flow (#29) — that's out of scope here — but the
+ * ten-minute wait now shows what it's doing (#5), which is the difference
+ * between "working" and "hung" (Q2).
  */
 import { useCallback, useEffect, useState } from "react";
 
-import { bootstrapEngine, engineStatus, type EngineStatus } from "./lib/engine";
+import {
+  bootstrapEngine,
+  engineStatus,
+  onEngineProgress,
+  type EngineProgress,
+  type EngineStatus,
+} from "./lib/engine";
+import { formatBytes } from "./lib/format";
 
 type View =
   | { phase: "checking" }
   | { phase: "idle"; status: EngineStatus }
-  | { phase: "installing" }
+  // `progress` is null until the first event arrives — the download's opening
+  // moments, where "Setting up…" is all there is to say.
+  | { phase: "installing"; progress: EngineProgress | null }
   // `retry` carries the action that failed, so "Try again" re-runs *that* — a
   // status-check failure re-checks; an install failure re-installs. Without it
   // a failed boot check would offer a button that starts a ten-minute install.
@@ -38,7 +48,15 @@ export default function App() {
   }, [check]);
 
   const install = useCallback(async () => {
-    setView({ phase: "installing" });
+    setView({ phase: "installing", progress: null });
+
+    // Subscribe before invoking: the events fire during the command, which only
+    // resolves at the very end. The functional update ignores events that land
+    // after we've left the installing phase (a late one racing a failure).
+    const unlisten = await onEngineProgress((p) =>
+      setView((v) => (v.phase === "installing" ? { phase: "installing", progress: p } : v)),
+    );
+
     try {
       await bootstrapEngine();
       await check();
@@ -46,6 +64,8 @@ export default function App() {
       // Already actionable: the Rust side puts the uv log tail in the message
       // (§8.6). Rendering it verbatim is the point, so it stays pre-wrapped.
       setView({ phase: "failed", error: String(e), retry: () => void install() });
+    } finally {
+      unlisten();
     }
   }, [check]);
 
@@ -65,12 +85,7 @@ function Engine({ view, onInstall }: { view: View; onInstall: () => void }) {
   }
 
   if (view.phase === "installing") {
-    return (
-      <Note>
-        Setting up the engine. This downloads about 6GB and takes roughly ten minutes — it will look
-        frozen until it finishes (#5).
-      </Note>
-    );
+    return <Progress progress={view.progress} />;
   }
 
   if (view.phase === "failed") {
@@ -119,6 +134,72 @@ function Engine({ view, onInstall }: { view: View; onInstall: () => void }) {
       </Button>
     </>
   );
+}
+
+/**
+ * The ten-minute wait, made legible (#5). Three signals, in order of how much
+ * the user needs them: a plain-language phase line, a byte bar while the
+ * tarball downloads, and uv's own latest line so the long install phase reads
+ * as motion rather than a freeze.
+ */
+function Progress({ progress }: { progress: EngineProgress | null }) {
+  return (
+    <div className="flex w-full max-w-md flex-col items-center gap-3">
+      <Note>{phaseLabel(progress)}</Note>
+
+      {progress?.phase === "downloading" && (
+        <>
+          <Bar received={progress.received} total={progress.total} />
+          <p className="text-xs tabular-nums text-neutral-500">
+            {formatBytes(progress.received)}
+            {progress.total != null && ` of ${formatBytes(progress.total)}`}
+          </p>
+        </>
+      )}
+
+      {progress?.phase === "installing" && (
+        // The raw uv line. Monospace and single-line so a torch-wheel path
+        // that runs long clips rather than reflowing the layout on every event.
+        <p className="w-full truncate text-center font-mono text-xs text-neutral-500">
+          {progress.line}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** A determinate bar when the total is known, an indeterminate shimmer when not. */
+function Bar({ received, total }: { received: number; total: number | null }) {
+  const pct = total != null && total > 0 ? Math.min(100, (received / total) * 100) : null;
+  return (
+    <div className="h-1.5 w-full overflow-hidden rounded-full bg-neutral-800">
+      <div
+        className={`h-full bg-neutral-100 transition-[width] duration-200 ${pct == null ? "w-1/3 animate-pulse" : ""}`}
+        style={pct == null ? undefined : { width: `${pct}%` }}
+      />
+    </div>
+  );
+}
+
+/** The one line that always shows, whether or not an event has arrived yet. */
+function phaseLabel(progress: EngineProgress | null): string {
+  switch (progress?.phase) {
+    case undefined:
+      // Before the first event: the command is invoked, the download not yet open.
+      return "Setting up the engine — about 6GB, roughly ten minutes.";
+    case "downloading":
+      return "Downloading ComfyUI…";
+    case "unpacking":
+      return "Unpacking ComfyUI…";
+    case "installing":
+      return `${capitalize(progress.step)}…`;
+    case "verifying":
+      return "Verifying the install…";
+  }
+}
+
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 function Note({ children, tone }: { children: React.ReactNode; tone?: "warn" }) {
