@@ -91,6 +91,31 @@ pub enum SpawnError {
         #[source]
         source: tauri_plugin_shell::Error,
     },
+
+    #[error(
+        "the engine started but its identity could not be recorded, so a crash \
+         would strand it holding the GPU: {source}\n  \
+         The engine was stopped. This usually means the app data directory is \
+         not writable."
+    )]
+    Pid {
+        #[source]
+        source: PidError,
+    },
+}
+
+/// Why the engine's identity could not be persisted for later reclaim.
+///
+/// Either failure leaves us unable to find and kill the engine after a crash,
+/// so [`spawn`] treats both as fatal rather than starting an engine it could
+/// never reclaim.
+#[derive(Debug, thiserror::Error)]
+pub enum PidError {
+    #[error("the just-spawned engine process (pid {pid}) was not visible to read its start time")]
+    NotVisible { pid: u32 },
+
+    #[error("could not write the engine pid file: {0}")]
+    Write(#[source] std::io::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -156,9 +181,14 @@ pub fn spawn<R: Runtime>(app: &AppHandle<R>, paths: &Paths) -> Result<Engine, Sp
         .spawn()
         .map_err(|source| SpawnError::Spawn { source })?;
 
-    // Record who to kill before returning: a crash between here and the next
-    // clean exit leaves this file as the only pointer to the leaked engine.
-    write_pid_file(&paths.engine_pid(), child.pid());
+    // Record who to kill before returning: after a crash this file is the only
+    // pointer to the leaked engine. If we can't write it, teardown has nothing
+    // to work from — better to stop the engine now and say so than to run one
+    // that a crash would strand holding the GPU (RISK-7).
+    if let Err(source) = write_pid_file(&paths.engine_pid(), child.pid()) {
+        let _ = child.kill();
+        return Err(SpawnError::Pid { source });
+    }
 
     Ok(Engine {
         port,
@@ -481,12 +511,14 @@ struct EnginePid {
 /// Records the running engine's identity so [`reclaim_stale`] can kill it after
 /// a crash or `SIGKILL` that skipped every teardown hook.
 ///
-/// Best-effort, like the log pump: a PID file we couldn't write only costs the
-/// crash-recovery safety net, and refusing to start the engine over it would be
-/// the worse failure. The start time comes from the OS; if the just-spawned
-/// process isn't visible yet we record `0`, a value no live process reports, so
-/// a record we can't fully trust is simply one that reclaim declines to act on.
-fn write_pid_file(path: &Path, pid: u32) {
+/// **Not** best-effort, unlike the log pump: teardown on *every* path — clean
+/// exit included — reads this file and nothing else, so a record we failed to
+/// write is an engine that can never be reclaimed. That is the exact leak this
+/// ticket exists to prevent (RISK-7), so both failures are fatal and [`spawn`]
+/// stops the engine rather than run one it can't account for. A start time we
+/// can't read is as disqualifying as a file we can't write: a record without it
+/// would match no live process, i.e. reclaim would silently never fire.
+fn write_pid_file(path: &Path, pid: u32) -> Result<(), PidError> {
     let handle = Pid::from_u32(pid);
     let mut sys = System::new();
     sys.refresh_processes_specifics(
@@ -494,16 +526,19 @@ fn write_pid_file(path: &Path, pid: u32) {
         true,
         ProcessRefreshKind::nothing(),
     );
-    let start_time = sys.process(handle).map(|p| p.start_time()).unwrap_or(0);
+    let start_time = sys
+        .process(handle)
+        .map(|p| p.start_time())
+        .ok_or(PidError::NotVisible { pid })?;
 
     let record = EnginePid { pid, start_time };
-    let Ok(json) = serde_json::to_string_pretty(&record) else {
-        return;
-    };
+    // Serializing this two-field struct cannot realistically fail; if serde ever
+    // surprises us it folds into the same `Write` path rather than a panic.
+    let json = serde_json::to_string(&record).map_err(|e| PidError::Write(e.into()))?;
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent).map_err(PidError::Write)?;
     }
-    let _ = std::fs::write(path, json);
+    std::fs::write(path, json).map_err(PidError::Write)
 }
 
 /// Kills an engine a previous session left running, if the PID file still names
@@ -515,10 +550,12 @@ fn write_pid_file(path: &Path, pid: u32) {
 /// `RunEvent::ExitRequested` stops the engine this session started. The updater
 /// path (`on_before_exit`) joins them in #38.
 ///
-/// The record is spent whatever happened — killed, already gone, or now held by
-/// a stranger — so it is removed either way and the next spawn writes a fresh
-/// one. All best-effort: a teardown that can't read or delete the file must
-/// still let the app exit.
+/// The record is cleared only once it has done its job: the engine is gone —
+/// killed, already dead, or the PID now belongs to a stranger. If a kill we
+/// attempted *fails*, the orphan is still holding the GPU and the file is the
+/// only way the next boot can retry, so it is deliberately kept. All I/O is
+/// best-effort: a teardown that can't read or delete the file must still let the
+/// app exit.
 ///
 /// Assumes one running instance. The reclaim cannot tell *our* leaked engine
 /// from one a second Darkroom legitimately started; enforcing a single instance
@@ -549,16 +586,30 @@ pub fn reclaim_stale(paths: &Paths) {
         ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
     );
 
-    if let Some(process) = sys.process(handle) {
-        let cmd: Vec<&Path> = process.cmd().iter().map(Path::new).collect();
-        if is_recorded_engine(&record, process.start_time(), &cmd, &paths.comfy_main()) {
-            // SIGKILL on Unix, TerminateProcess on Windows. The orphan is past a
-            // graceful shutdown, and a hard kill is what frees the GPU now.
-            process.kill();
+    match sys.process(handle) {
+        // The engine we recorded is still alive at that PID.
+        Some(process) => {
+            let cmd: Vec<&Path> = process.cmd().iter().map(Path::new).collect();
+            if is_recorded_engine(&record, process.start_time(), &cmd, &paths.comfy_main()) {
+                // SIGKILL on Unix, TerminateProcess on Windows. The orphan is
+                // past a graceful shutdown, and a hard kill is what frees the
+                // GPU now. Keep the record if the kill did not take, so the next
+                // boot can try again rather than lose its only pointer to a
+                // process still holding the GPU.
+                if process.kill() {
+                    let _ = std::fs::remove_file(&path);
+                }
+            } else {
+                // A stranger holds the PID now (reused number, or a different
+                // process). Nothing of ours to kill; the record is spent.
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+        // Nothing at that PID — the engine already died. The record is spent.
+        None => {
+            let _ = std::fs::remove_file(&path);
         }
     }
-
-    let _ = std::fs::remove_file(&path);
 }
 
 /// Whether the live process at the recorded PID is really the engine we wrote
@@ -566,22 +617,20 @@ pub fn reclaim_stale(paths: &Paths) {
 ///
 /// Two guards, both required. The start time defeats PID reuse: a recycled PID
 /// belongs to a later process with a different start, so a match means the very
-/// process we recorded. The command line covers the astronomically unlikely
-/// residue — a reused PID whose process happened to start in the same whole
-/// second — because our engine always runs `main.py`, whose absolute appdata
-/// path appears in no unrelated process. An empty command line (a platform or
-/// permission that hides it) leaves the start time to stand alone rather than
-/// block a kill the GPU depends on.
+/// process we recorded. The command line confirms identity directly — our
+/// engine always runs `main.py`, whose absolute appdata path appears in no
+/// unrelated process — and it is not optional: a process we cannot confirm is
+/// running our engine is one we must not kill, so a hidden or empty command
+/// line rejects the reclaim rather than falling back to the start time alone. In
+/// practice a live engine we spawned is always our own process, whose command
+/// line the OS lets us read; an unreadable one is not the engine.
 fn is_recorded_engine(
     record: &EnginePid,
     start_time: u64,
     cmd: &[&Path],
     comfy_main: &Path,
 ) -> bool {
-    if record.start_time != start_time {
-        return false;
-    }
-    cmd.is_empty() || cmd.contains(&comfy_main)
+    record.start_time == start_time && cmd.contains(&comfy_main)
 }
 
 #[cfg(test)]
@@ -931,12 +980,31 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("engine.pid");
 
-        write_pid_file(&path, std::process::id());
+        write_pid_file(&path, std::process::id()).expect("our own pid is recordable");
 
         let raw = fs::read_to_string(&path).expect("the pid file was written");
         let record: EnginePid = serde_json::from_str(&raw).expect("valid json");
         assert_eq!(record.pid, std::process::id());
         assert_ne!(record.start_time, 0, "a live process has a real start time");
+    }
+
+    /// A PID no live process holds cannot yield a start time, so its identity is
+    /// unrecordable — `spawn` turns this into a fatal `SpawnError::Pid` rather
+    /// than run an engine it could never reclaim.
+    #[test]
+    fn recording_an_absent_pid_fails() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("engine.pid");
+
+        // A PID far above the OS maximum names no process, so its start time is
+        // unreadable.
+        let result = write_pid_file(&path, u32::MAX);
+
+        assert!(
+            matches!(result, Err(PidError::NotVisible { pid }) if pid == u32::MAX),
+            "an unrecordable identity must be an error, got {result:?}",
+        );
+        assert!(!path.exists(), "no half-written record is left behind");
     }
 
     /// The reuse guard in isolation: a recycled PID belongs to a process with a
@@ -960,12 +1028,15 @@ mod tests {
     /// The identity guard in isolation: a matching start second is not enough if
     /// the command line proves the process is something other than our engine.
     #[test]
-    fn identity_requires_our_main_py_when_the_command_line_shows() {
+    fn identity_requires_our_main_py() {
         let main = Path::new("/appdata/engine/ComfyUI/main.py");
         let record = EnginePid {
             pid: 42,
             start_time: 1000,
         };
+
+        let ours = [Path::new("/appdata/engine/.venv/bin/python"), main];
+        assert!(is_recorded_engine(&record, 1000, &ours, main));
 
         let stranger = [Path::new("/usr/bin/vlc"), Path::new("movie.mkv")];
         assert!(
@@ -973,9 +1044,12 @@ mod tests {
             "same start second but not our engine — leave it alone",
         );
 
-        // A hidden command line can't disprove identity, so the start-time match
-        // stands alone rather than stranding a kill the GPU depends on.
-        assert!(is_recorded_engine(&record, 1000, &[], main));
+        // A hidden or empty command line cannot confirm the process is our
+        // engine, so it must reject the reclaim, not fall back to start time.
+        assert!(
+            !is_recorded_engine(&record, 1000, &[], main),
+            "an unconfirmable process must never be killed",
+        );
     }
 
     #[test]
@@ -1055,5 +1129,61 @@ mod tests {
         reclaim_stale(&paths);
 
         assert!(!paths.engine_pid().exists());
+    }
+
+    /// The positive path against a real, disposable process: an engine that
+    /// matches its record must actually be killed and the record cleared. Unix
+    /// only — it stands a small script up *at* `main.py`'s path so the process's
+    /// argv carries exactly the path identity checks, which needs a shebang. The
+    /// CI matrix runs this on Linux and macOS; Windows leans on the identity and
+    /// no-op tests above plus `sysinfo`'s own `kill`.
+    #[cfg(unix)]
+    #[test]
+    fn reclaim_kills_a_matching_engine_and_clears_the_record() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let paths = Paths::new(dir.path());
+        let main = paths.comfy_main();
+        fs::create_dir_all(main.parent().expect("comfy dir")).expect("mkdir");
+
+        // A stand-in for the engine: an executable sitting at main.py's path
+        // that just idles. Launched directly, the kernel runs it as
+        // `sh <main.py>`, so `main.py` is the process's own argv — exactly what
+        // `is_recorded_engine` matches on.
+        fs::write(&main, "#!/bin/sh\nwhile true; do sleep 1; done\n").expect("write stand-in");
+        fs::set_permissions(&main, fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let mut child = std::process::Command::new(&main)
+            .spawn()
+            .expect("spawn the engine stand-in");
+
+        // Record its identity exactly as spawn would, then reclaim it.
+        write_pid_file(&paths.engine_pid(), child.id()).expect("record the stand-in");
+        reclaim_stale(&paths);
+
+        // The process must actually die. Poll rather than assume an instant
+        // reap; SIGKILL is prompt but not synchronous.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let killed = loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break true,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                _ => break false,
+            }
+        };
+        if !killed {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+
+        assert!(killed, "reclaim must actually kill a matching engine");
+        assert!(
+            !paths.engine_pid().exists(),
+            "a reclaimed engine's record is cleared",
+        );
     }
 }
