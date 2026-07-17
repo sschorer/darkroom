@@ -59,6 +59,15 @@ describe("parseMessage", () => {
     });
   });
 
+  it("rejects a malformed executing.node rather than forging a completion", () => {
+    // A missing/numeric/boolean node must not be coerced to null — that null is
+    // the "queue drained" signal, so coercion would fake a finish the engine
+    // never sent.
+    expect(parseMessage(frame("executing", { prompt_id: "abc" }))).toBeNull();
+    expect(parseMessage(frame("executing", { node: 6, prompt_id: "abc" }))).toBeNull();
+    expect(parseMessage(frame("executing", { node: false, prompt_id: "abc" }))).toBeNull();
+  });
+
   it("surfaces the failing node and message from execution_error", () => {
     const event = parseMessage(
       frame("execution_error", {
@@ -187,17 +196,21 @@ describe("ComfyClient", () => {
     expect(rejected.message).toContain("Required input is missing: model");
   });
 
-  it("degrades to the bare status when the error body is not the expected JSON", async () => {
+  it("keeps the response body when the error is not the expected JSON, not just the status", async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValue(new Response("<html>502 Bad Gateway</html>", { status: 502 }));
+      .mockResolvedValue(
+        new Response("Internal Server Error: CUDA out of memory", { status: 500 }),
+      );
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new ComfyClient(51234);
     const err = (await client.submit({}).catch((e: unknown) => e)) as PromptRejected;
 
     expect(err).toBeInstanceOf(PromptRejected);
-    expect(err.message).toContain("502");
+    expect(err.message).toContain("500");
+    // The body carried the real reason; a bare status would have thrown it away.
+    expect(err.message).toContain("CUDA out of memory");
     expect(err.nodeErrors).toEqual({});
   });
 
@@ -231,5 +244,90 @@ describe("ComfyClient", () => {
     expect(parsed.searchParams.get("filename")).toBe("a b&c.png");
     expect(parsed.searchParams.get("subfolder")).toBe("sub dir");
     expect(parsed.searchParams.get("type")).toBe("output");
+  });
+});
+
+/**
+ * The socket half of the mismatch trap: it is not enough that `clientId` is the
+ * right *value* — `connect()` must put it on the wire as `clientId`, the exact
+ * query param ComfyUI reads. A mock WebSocket captures the URL and lets us drive
+ * frames through the real message handler. (Replaying *recorded* engine traffic
+ * is #22's mock-engine job; these hand-written frames only pin the wiring.)
+ */
+describe("ComfyClient.connect", () => {
+  class MockWebSocket {
+    static last: MockWebSocket | undefined;
+    url: string;
+    binaryType = "";
+    readonly listeners: Record<string, ((ev: unknown) => void)[]> = {};
+    closed = false;
+
+    constructor(url: string) {
+      this.url = url;
+      MockWebSocket.last = this;
+    }
+    addEventListener(type: string, cb: (ev: unknown) => void) {
+      (this.listeners[type] ??= []).push(cb);
+    }
+    close() {
+      this.closed = true;
+      this.emit("close", {});
+    }
+    emit(type: string, ev: unknown) {
+      for (const cb of this.listeners[type] ?? []) cb(ev);
+    }
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    MockWebSocket.last = undefined;
+  });
+
+  it("sends the client id as the clientId query param and reads binary as ArrayBuffer", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+
+    new ComfyClient(51234, "fixed-id").connect({ onEvent: () => {} });
+
+    const ws = MockWebSocket.last!;
+    // The socket's clientId must equal what submit() sends as client_id.
+    expect(ws.url).toBe("ws://127.0.0.1:51234/ws?clientId=fixed-id");
+    // arraybuffer is what makes a preview frame a non-string parseMessage skips.
+    expect(ws.binaryType).toBe("arraybuffer");
+  });
+
+  it("routes parsed frames to onEvent and drops binary and unmodelled ones", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const events: EngineEvent[] = [];
+    new ComfyClient(51234, "fixed-id").connect({ onEvent: (e) => events.push(e) });
+
+    const ws = MockWebSocket.last!;
+    ws.emit("message", {
+      data: frame("progress", { value: 1, max: 4, node: "3", prompt_id: "p" }),
+    });
+    ws.emit("message", { data: new ArrayBuffer(8) }); // preview — dropped
+    ws.emit("message", { data: frame("status", { status: {} }) }); // unmodelled — dropped
+    ws.emit("message", { data: frame("executing", { node: null, prompt_id: "p" }) });
+
+    expect(events).toEqual<EngineEvent[]>([
+      { kind: "progress", promptId: "p", node: "3", value: 1, max: 4 },
+      { kind: "executing", promptId: "p", node: null },
+    ]);
+  });
+
+  it("resolves opened on open and reports close through the handler", async () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    let closed = false;
+    const socket = new ComfyClient(51234, "fixed-id").connect({
+      onEvent: () => {},
+      onClose: () => (closed = true),
+    });
+
+    const ws = MockWebSocket.last!;
+    ws.emit("open", {});
+    await expect(socket.opened).resolves.toBeUndefined();
+
+    socket.close();
+    expect(ws.closed).toBe(true);
+    expect(closed).toBe(true);
   });
 });

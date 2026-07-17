@@ -269,13 +269,18 @@ export function parseMessage(data: unknown): EngineEvent | null {
       return null;
 
     case "executing":
-      // `node` is a string while a node runs and null when the queue drains —
-      // that null is the completion signal, so it is a value, not a reason to
-      // drop the event.
+      // `node` is a string while a node runs and literal null when the queue
+      // drains — that null is the completion signal, so it is a value, not a
+      // reason to drop the event. Anything else (missing, numeric, boolean) is a
+      // malformed frame: reject it rather than coerce it to null, which would
+      // otherwise forge a completion the engine never sent.
+      if (d.node !== null && typeof d.node !== "string") {
+        return null;
+      }
       return {
         kind: "executing",
         promptId,
-        node: typeof d.node === "string" ? d.node : null,
+        node: d.node,
       };
 
     case "execution_error":
@@ -341,35 +346,57 @@ export function outputsFromHistory(history: unknown, promptId: string): OutputRe
   return refs;
 }
 
+/** A body snippet longer than this is truncated into the rejection detail. */
+const BODY_TAIL_LIMIT = 500;
+
 /**
  * Builds the {@link PromptRejected} for a non-2xx `/prompt`. Pulls
  * `node_errors` and the top-level `error.message` from the body when it is the
- * JSON ComfyUI sends on a 400, and degrades to the bare status when it is not
- * (a proxy error page, a truncated body) — the point is to never lose the
- * response by assuming a shape it might not have.
+ * JSON ComfyUI sends on a 400 — that is the actionable part §8.6 wants, naming
+ * the failing node. When the body is *not* that JSON (a 5xx trace, a truncated
+ * response), the raw text is folded into the detail rather than discarded, so
+ * the reason never collapses to a bare status code.
+ *
+ * The body is read as text *once* and parsed from there: a `Response` body is a
+ * single-use stream, so reading `.json()` and `.text()` off the same response is
+ * not an option. The engine *log tail* — the other half of §8.6 — lives on the
+ * Rust side (`engine.log`, unreachable from this fetch layer); wiring it into a
+ * client-side rejection is #28's error-surfacing work, not this minimal client's.
  */
 async function promptError(res: Response): Promise<PromptRejected> {
   let nodeErrors: Record<string, unknown> = {};
-  let detail = `the engine rejected the prompt: HTTP ${res.status}`;
+  const status = `the engine rejected the prompt: HTTP ${res.status}`;
 
+  const raw = await res.text().catch(() => "");
+
+  type ErrorBody = { error?: { message?: unknown }; node_errors?: unknown };
+  let parsed: ErrorBody | null = null;
   try {
-    const body = (await res.json()) as {
-      error?: { message?: unknown };
-      node_errors?: unknown;
-    };
-    if (body.node_errors && typeof body.node_errors === "object") {
-      nodeErrors = body.node_errors as Record<string, unknown>;
-    }
-    const summary = summariseNodeErrors(nodeErrors);
-    const top = typeof body.error?.message === "string" ? body.error.message : null;
-    if (top || summary) {
-      detail = [top, summary].filter(Boolean).join(" — ");
-    }
+    parsed = raw ? (JSON.parse(raw) as ErrorBody) : null;
   } catch {
-    // Not the JSON we expected; the status-only detail above stands.
+    parsed = null; // not the JSON we expected; fall through to the text tail.
   }
 
+  if (parsed && parsed.node_errors && typeof parsed.node_errors === "object") {
+    nodeErrors = parsed.node_errors as Record<string, unknown>;
+  }
+  const summary = summariseNodeErrors(nodeErrors);
+  const top = typeof parsed?.error?.message === "string" ? parsed.error.message : null;
+
+  // Prefer the structured diagnostics; otherwise keep whatever the server said,
+  // trimmed to a sane length. Only when there is nothing at all do we fall back
+  // to the status line alone.
+  const structured = [top, summary].filter(Boolean).join(" — ");
+  const tail = !structured && raw ? tailOf(raw) : "";
+  const detail = [status, structured || tail].filter(Boolean).join("\n  ");
+
   return new PromptRejected(nodeErrors, detail);
+}
+
+/** The trailing, collapsed snippet of a response body, capped for readability. */
+function tailOf(body: string): string {
+  const text = body.trim().replace(/\s+/g, " ");
+  return text.length > BODY_TAIL_LIMIT ? `…${text.slice(-BODY_TAIL_LIMIT)}` : text;
 }
 
 /**
