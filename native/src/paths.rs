@@ -12,6 +12,7 @@
 //! ├── logs/               # engine stdout/stderr, rotated (#8)
 //! ├── models/
 //! ├── outputs/
+//! ├── engine.pid          # running engine's identity; reclaimed at boot (#9)
 //! └── darkroom.db
 //! ```
 //!
@@ -179,6 +180,18 @@ impl Paths {
         self.root.join("darkroom.db")
     }
 
+    /// Records the running engine's identity (PID + start time) so a later boot
+    /// can find and kill an engine a crash or `SIGKILL` left holding the GPU
+    /// (§8.3, ADR-016). Written when the engine spawns, removed at teardown.
+    ///
+    /// A sibling of `engine/`, not a child: a reprovision wipes `engine/`, and
+    /// the pointer to a still-running process must survive that so the reclaim
+    /// can still reach it. It is runtime state like `darkroom.db`, not part of
+    /// the install, so it lives at the root.
+    pub fn engine_pid(&self) -> PathBuf {
+        self.root.join("engine.pid")
+    }
+
     /// Creates the directories the app writes into.
     ///
     /// Not `.venv` or `ComfyUI` — those are uv's and the tarball's to make, and
@@ -219,6 +232,7 @@ mod tests {
             p.uv_python(),
             p.models(),
             p.outputs(),
+            p.engine_pid(),
             p.db(),
         ] {
             assert!(
@@ -259,7 +273,19 @@ mod tests {
         assert_eq!(rel(p.uv_python()), ".uv/python");
         assert_eq!(rel(p.models()), "models");
         assert_eq!(rel(p.outputs()), "outputs");
+        assert_eq!(rel(p.engine_pid()), "engine.pid");
         assert_eq!(rel(p.db()), "darkroom.db");
+    }
+
+    // The pid file must outlive an engine wipe: a reprovision deletes engine/,
+    // but a process it left running is still holding the GPU and the pointer to
+    // it must survive to be reclaimed. So it sits at the root, not under
+    // engine/, the same reasoning as .uv above.
+    #[test]
+    fn the_pid_file_survives_an_engine_wipe() {
+        let p = paths();
+        assert!(!p.engine_pid().starts_with(p.engine()));
+        assert!(p.engine_pid().starts_with(p.root()));
     }
 
     // The reason uv_home() is not under engine(): a reprovision deletes the

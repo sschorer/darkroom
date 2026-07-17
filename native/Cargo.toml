@@ -55,6 +55,14 @@ tokio = { version = "1", features = ["time"] }
 # came from, not merely which commit. See engine/bootstrap.rs.
 sha2 = "0.10"
 
+# Stale-engine reclaim (sidecar.rs, §8.3). A leaked engine after a SIGKILL or a
+# crash is only reclaimable by looking the PID up in the process table, and
+# doing it right — never killing an innocent process the OS gave the same PID —
+# needs each process's start time and command line, cross-platform. That is
+# exactly what this reads. Only the `system` feature: we inspect processes, not
+# disks, networks, or components, and its Windows sub-features come with it.
+sysinfo = { version = "0.36", default-features = false, features = ["system"] }
+
 thiserror = "2"
 
 [dev-dependencies]

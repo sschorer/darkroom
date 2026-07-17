@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use tauri::menu::{Menu, MenuItem, MenuItemKind, HELP_SUBMENU_ID};
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, RunEvent, Runtime};
 
 use crate::paths::Paths;
 
@@ -83,6 +83,14 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: tauri::menu::MenuEve
     }
 }
 
+/// Kills a leaked engine (§8.3). Called at boot and again at exit; both go
+/// through the PID file, so neither needs a live handle to the child.
+fn reclaim_engine<R: Runtime, M: Manager<R>>(manager: &M) {
+    if let Ok(paths) = Paths::resolve(manager) {
+        sidecar::reclaim_stale(&paths);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -90,15 +98,34 @@ pub fn run() {
         .menu(build_menu)
         .on_menu_event(handle_menu_event)
         .manage(commands::Bootstrapping::default())
+        .setup(|app| {
+            // Before this session can spawn its own engine, clear one a
+            // hard-killed previous run left holding the GPU (§8.3).
+            reclaim_engine(app.handle());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::engine_status,
             commands::bootstrap_engine
-        ]);
+        ])
+        .build(tauri::generate_context!());
 
     // No `.expect()`: this is a desktop app, and a panic here is a window that
     // never appears with nothing to explain it (CLAUDE.md). Say what broke.
-    if let Err(err) = app.run(tauri::generate_context!()) {
-        report_startup_failure(&err);
-        std::process::exit(1);
-    }
+    let app = match app {
+        Ok(app) => app,
+        Err(err) => {
+            report_startup_failure(&err);
+            std::process::exit(1);
+        }
+    };
+
+    // `.run` rather than letting the builder run so `ExitRequested` — normal
+    // quit — can stop the engine before the process leaves. The stale-PID check
+    // above covers the exits that never reach here (SIGKILL, a hard crash).
+    app.run(|app, event| {
+        if let RunEvent::ExitRequested { .. } = event {
+            reclaim_engine(app);
+        }
+    });
 }

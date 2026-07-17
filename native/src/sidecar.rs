@@ -16,7 +16,16 @@
 //!   would put an unauthenticated `/prompt` on the network.
 //!
 //! Spawn ([`spawn`]), health polling ([`wait_until_healthy`]), and the log pump
-//! ([`pump`]) all build on the [`Engine`] handle; teardown (#9) is still to come.
+//! ([`pump`]) all build on the [`Engine`] handle.
+//!
+//! Teardown is [`reclaim_stale`]: the engine holds several GB of VRAM, so a
+//! process left behind by a crash makes the next launch fail with an OOM the
+//! user can't explain (§8.3, ADR-016). Rather than track a live child handle,
+//! [`spawn`] writes the engine's identity to a PID file and `reclaim_stale`
+//! reads it — at boot to clear a leak from a hard-killed session, and at
+//! `RunEvent::ExitRequested` to stop the engine this session started. One file
+//! drives both, and the identity check keeps a recycled PID from costing an
+//! innocent process its life.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -24,7 +33,8 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use tauri::async_runtime::Receiver;
 use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
@@ -99,18 +109,19 @@ pub enum HealthError {
 
 /// A running engine and the port it was told to serve on.
 ///
-/// Ownership of the process lives here from spawn until teardown, and each half
-/// of the lifecycle takes one piece: [`wait_until_healthy`] polls
-/// [`port`](Self::port) until the server answers, [`pump`] drains
-/// [`events`](Self::events) into the log, and #9 calls [`CommandChild::kill`] on
-/// [`child`](Self::child).
+/// Ownership of the process lives here from spawn onward, and each half of the
+/// lifecycle takes one piece: [`wait_until_healthy`] polls [`port`](Self::port)
+/// until the server answers, and [`pump`] drains [`events`](Self::events) into
+/// the log. Teardown does *not* go through this handle — [`spawn`] records the
+/// process's identity to a PID file and [`reclaim_stale`] kills it from there,
+/// so the child can be reclaimed even after a crash that dropped this handle.
 pub struct Engine {
     /// The loopback port ComfyUI was told to bind. The frontend builds its
     /// engine URL from this (ADR-008).
     pub port: u16,
 
-    /// The live process. `kill` consumes it, which is why teardown moves it out
-    /// of the handle rather than borrowing.
+    /// The live process. Held so the plugin keeps its pipes open for the log
+    /// pump; teardown kills by PID (see [`reclaim_stale`]), not through here.
     pub child: CommandChild,
 
     /// Line-buffered stdout/stderr from the engine.
@@ -144,6 +155,10 @@ pub fn spawn<R: Runtime>(app: &AppHandle<R>, paths: &Paths) -> Result<Engine, Sp
         .args(engine_args(&paths.comfy_main(), port))
         .spawn()
         .map_err(|source| SpawnError::Spawn { source })?;
+
+    // Record who to kill before returning: a crash between here and the next
+    // clean exit leaves this file as the only pointer to the leaked engine.
+    write_pid_file(&paths.engine_pid(), child.pid());
 
     Ok(Engine {
         port,
@@ -444,6 +459,129 @@ fn free_port() -> std::io::Result<u16> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let port = listener.local_addr()?.port();
     Ok(port)
+}
+
+// --- Teardown: the PID file and stale-engine reclaim (§8.3) -------------------
+
+/// The identity of a running engine, persisted so a later boot can find it.
+///
+/// A bare PID is not enough. PIDs are recycled, and an engine that died leaves
+/// its number free for the OS to hand to some unrelated process; killing that
+/// number blindly would take down whatever now holds it. A process's start time
+/// is what a recycled PID does *not* carry over — the reused number belongs to a
+/// process that started later — so the pair `(pid, start_time)` names one
+/// specific process across the whole reuse.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct EnginePid {
+    pid: u32,
+    /// Seconds since the Unix epoch, as the OS reports the process's start.
+    start_time: u64,
+}
+
+/// Records the running engine's identity so [`reclaim_stale`] can kill it after
+/// a crash or `SIGKILL` that skipped every teardown hook.
+///
+/// Best-effort, like the log pump: a PID file we couldn't write only costs the
+/// crash-recovery safety net, and refusing to start the engine over it would be
+/// the worse failure. The start time comes from the OS; if the just-spawned
+/// process isn't visible yet we record `0`, a value no live process reports, so
+/// a record we can't fully trust is simply one that reclaim declines to act on.
+fn write_pid_file(path: &Path, pid: u32) {
+    let handle = Pid::from_u32(pid);
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[handle]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    let start_time = sys.process(handle).map(|p| p.start_time()).unwrap_or(0);
+
+    let record = EnginePid { pid, start_time };
+    let Ok(json) = serde_json::to_string_pretty(&record) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, json);
+}
+
+/// Kills an engine a previous session left running, if the PID file still names
+/// a live one, and clears the file.
+///
+/// This is the teardown of §8.3, wired into two places that share it through the
+/// file rather than a live handle: boot (before this session might spawn its
+/// own engine) reclaims a leak from a hard-killed run, and
+/// `RunEvent::ExitRequested` stops the engine this session started. The updater
+/// path (`on_before_exit`) joins them in #38.
+///
+/// The record is spent whatever happened — killed, already gone, or now held by
+/// a stranger — so it is removed either way and the next spawn writes a fresh
+/// one. All best-effort: a teardown that can't read or delete the file must
+/// still let the app exit.
+///
+/// Assumes one running instance. The reclaim cannot tell *our* leaked engine
+/// from one a second Darkroom legitimately started; enforcing a single instance
+/// is a separate concern, and the whole appdata tree already assumes it.
+pub fn reclaim_stale(paths: &Paths) {
+    let path = paths.engine_pid();
+
+    // No file is the common case — nothing ran, or the last run exited cleanly
+    // and cleared it. Nothing to reclaim.
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let record: EnginePid = match serde_json::from_str(&raw) {
+        Ok(record) => record,
+        // A truncated or garbled file names nothing safe to act on; drop it
+        // rather than carry an unreadable record forward.
+        Err(_) => {
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
+    };
+
+    let handle = Pid::from_u32(record.pid);
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[handle]),
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+
+    if let Some(process) = sys.process(handle) {
+        let cmd: Vec<&Path> = process.cmd().iter().map(Path::new).collect();
+        if is_recorded_engine(&record, process.start_time(), &cmd, &paths.comfy_main()) {
+            // SIGKILL on Unix, TerminateProcess on Windows. The orphan is past a
+            // graceful shutdown, and a hard kill is what frees the GPU now.
+            process.kill();
+        }
+    }
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Whether the live process at the recorded PID is really the engine we wrote
+/// down, and so safe to kill.
+///
+/// Two guards, both required. The start time defeats PID reuse: a recycled PID
+/// belongs to a later process with a different start, so a match means the very
+/// process we recorded. The command line covers the astronomically unlikely
+/// residue — a reused PID whose process happened to start in the same whole
+/// second — because our engine always runs `main.py`, whose absolute appdata
+/// path appears in no unrelated process. An empty command line (a platform or
+/// permission that hides it) leaves the start time to stand alone rather than
+/// block a kill the GPU depends on.
+fn is_recorded_engine(
+    record: &EnginePid,
+    start_time: u64,
+    cmd: &[&Path],
+    comfy_main: &Path,
+) -> bool {
+    if record.start_time != start_time {
+        return false;
+    }
+    cmd.is_empty() || cmd.contains(&comfy_main)
 }
 
 #[cfg(test)]
@@ -768,5 +906,154 @@ mod tests {
         let log = RotatingLog::open(PathBuf::from("/logs/engine.log"), LOG_MAX_BYTES, LOG_KEEP);
         assert_eq!(log.backup(1), PathBuf::from("/logs/engine.log.1"));
         assert_eq!(log.backup(2), PathBuf::from("/logs/engine.log.2"));
+    }
+
+    // --- Teardown: the PID file and stale-engine reclaim ----------------------
+
+    /// The start time the OS reports for this test process, so a record built
+    /// with it names *us* — the safest live victim for proving the reclaim
+    /// leaves the wrong process alone.
+    fn our_start_time() -> u64 {
+        let me = Pid::from_u32(std::process::id());
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[me]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        sys.process(me)
+            .expect("this process is in the table")
+            .start_time()
+    }
+
+    #[test]
+    fn a_pid_record_round_trips_through_the_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("engine.pid");
+
+        write_pid_file(&path, std::process::id());
+
+        let raw = fs::read_to_string(&path).expect("the pid file was written");
+        let record: EnginePid = serde_json::from_str(&raw).expect("valid json");
+        assert_eq!(record.pid, std::process::id());
+        assert_ne!(record.start_time, 0, "a live process has a real start time");
+    }
+
+    /// The reuse guard in isolation: a recycled PID belongs to a process with a
+    /// different start time, and that difference alone must veto the kill.
+    #[test]
+    fn identity_requires_a_matching_start_time() {
+        let main = Path::new("/appdata/engine/ComfyUI/main.py");
+        let cmd = [Path::new("/appdata/engine/.venv/bin/python"), main];
+        let record = EnginePid {
+            pid: 42,
+            start_time: 1000,
+        };
+
+        assert!(is_recorded_engine(&record, 1000, &cmd, main));
+        assert!(
+            !is_recorded_engine(&record, 2000, &cmd, main),
+            "a recycled pid carries a different start time and must not be killed",
+        );
+    }
+
+    /// The identity guard in isolation: a matching start second is not enough if
+    /// the command line proves the process is something other than our engine.
+    #[test]
+    fn identity_requires_our_main_py_when_the_command_line_shows() {
+        let main = Path::new("/appdata/engine/ComfyUI/main.py");
+        let record = EnginePid {
+            pid: 42,
+            start_time: 1000,
+        };
+
+        let stranger = [Path::new("/usr/bin/vlc"), Path::new("movie.mkv")];
+        assert!(
+            !is_recorded_engine(&record, 1000, &stranger, main),
+            "same start second but not our engine — leave it alone",
+        );
+
+        // A hidden command line can't disprove identity, so the start-time match
+        // stands alone rather than stranding a kill the GPU depends on.
+        assert!(is_recorded_engine(&record, 1000, &[], main));
+    }
+
+    #[test]
+    fn reclaim_with_no_pid_file_is_a_no_op() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let paths = Paths::new(dir.path());
+
+        reclaim_stale(&paths);
+
+        assert!(
+            !paths.engine_pid().exists(),
+            "reclaim must not conjure a file it never found",
+        );
+    }
+
+    #[test]
+    fn reclaim_drops_a_corrupt_pid_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let paths = Paths::new(dir.path());
+        fs::write(paths.engine_pid(), "{ not json").expect("seed a corrupt file");
+
+        reclaim_stale(&paths);
+
+        assert!(
+            !paths.engine_pid().exists(),
+            "an unreadable record is cleared, not carried forward",
+        );
+    }
+
+    /// The guard that matters most, against a live process: a record whose start
+    /// time no longer matches the process at its PID must not get that process
+    /// killed. Aiming the reclaim at this very test process with a wrong start
+    /// time proves it — a broken guard would `SIGKILL` the test runner.
+    #[test]
+    fn reclaim_spares_a_live_process_whose_start_time_disagrees() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let paths = Paths::new(dir.path());
+
+        let record = EnginePid {
+            pid: std::process::id(),
+            start_time: our_start_time() + 1,
+        };
+        fs::write(
+            paths.engine_pid(),
+            serde_json::to_string(&record).expect("json"),
+        )
+        .expect("seed the pid file");
+
+        reclaim_stale(&paths);
+
+        // Reaching this line at all is the assertion: we were not killed.
+        assert!(
+            !paths.engine_pid().exists(),
+            "the spent record is cleared whatever the outcome",
+        );
+    }
+
+    /// The identity guard against the same live victim: even a start time that
+    /// matches must not kill a process that isn't running our `main.py`. The
+    /// test binary is exactly such a process, so a correct reclaim leaves it
+    /// running and only clears the file.
+    #[test]
+    fn reclaim_spares_a_live_process_that_is_not_the_engine() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let paths = Paths::new(dir.path());
+
+        let record = EnginePid {
+            pid: std::process::id(),
+            start_time: our_start_time(),
+        };
+        fs::write(
+            paths.engine_pid(),
+            serde_json::to_string(&record).expect("json"),
+        )
+        .expect("seed the pid file");
+
+        reclaim_stale(&paths);
+
+        assert!(!paths.engine_pid().exists());
     }
 }
