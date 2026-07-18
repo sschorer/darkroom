@@ -140,6 +140,34 @@ describe("replaying a recorded session end to end through generate", () => {
   });
 });
 
+describe("the mock guards the client_id trap", () => {
+  it("refuses a /prompt whose client_id differs from the socket that connected", async () => {
+    replay(success);
+    // Connect as one id, then POST /prompt as another — the drift a real engine
+    // would answer with silence. The mock turns that silence into a failure.
+    new WebSocket("ws://127.0.0.1:8188/ws?clientId=id-on-the-socket");
+    await flush();
+
+    const mismatched = fetch("http://127.0.0.1:8188/prompt", {
+      method: "POST",
+      body: JSON.stringify({ prompt: {}, client_id: "a-different-id" }),
+    });
+    await expect(mismatched).rejects.toThrow(/client_id mismatch/);
+  });
+
+  it("accepts a /prompt whose client_id matches the socket", async () => {
+    replay(success);
+    new WebSocket("ws://127.0.0.1:8188/ws?clientId=same-id");
+    await flush();
+
+    const res = await fetch("http://127.0.0.1:8188/prompt", {
+      method: "POST",
+      body: JSON.stringify({ prompt: {}, client_id: "same-id" }),
+    });
+    expect(res.status).toBe(200);
+  });
+});
+
 describe("ComfyClient.submit against a recorded rejection", () => {
   it("throws PromptRejected carrying node_errors from the recorded 400", async () => {
     replay(rejected);

@@ -37,27 +37,47 @@
 // client's sole question of a binary frame is whether it's a string, so the bytes
 // carry no test signal and a base64 JPEG would only bloat the fixture.
 //
-// Node stdlib only (global fetch + WebSocket, Node 18+), matching fetch-uv.mjs —
-// no npm dependency, so it runs without an install step.
+// Node stdlib only (global fetch + WebSocket), matching fetch-uv.mjs — no npm
+// dependency, so it runs without an install step. Needs Node 22+: `fetch` has
+// been global since 18, but `WebSocket` only became global (unflagged) in 22.
 
-import { writeFile, mkdir } from "node:fs/promises";
+import { writeFile, readFile, mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-const FIXTURE_DIR = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "app",
-  "lib",
-  "__fixtures__",
-  "comfy",
-);
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const FIXTURE_DIR = join(SCRIPT_DIR, "..", "app", "lib", "__fixtures__", "comfy");
+/** The engine pin (ADR-001). Its sha is the provenance a refreshed fixture records. */
+const COMFY_LOCK = join(SCRIPT_DIR, "..", "engine", "comfy.lock");
+
+/** The three fixtures the mock replays; also the only legal `--scenario` values. */
+const SCENARIOS = new Set(["success", "rejected", "error"]);
 
 /** The engine's completion signal: executing with a literal null node (main.py). */
 const isCompletion = (m) => m.type === "executing" && m.data?.node === null;
 /** A node threw in Python — a terminal frame too. */
 const isError = (m) => m.type === "execution_error";
+
+/**
+ * What actually happened, from the /prompt status and the terminal frame — so a
+ * recording can be checked against the `--scenario` it was asked to capture. A
+ * 400 saved as `session-success.json` (or a clean run saved as `error`) is a
+ * mislabelled fixture the mock would then replay as truth.
+ */
+function classifyOutcome(prompt, terminal) {
+  if (prompt.status >= 400) return "rejected";
+  if (terminal && isError(terminal)) return "error";
+  if (terminal && isCompletion(terminal)) return "success";
+  return "unknown";
+}
+
+/** The pinned ComfyUI sha from `engine/comfy.lock`, or null if it can't be read. */
+async function readComfySha() {
+  return readFile(COMFY_LOCK, "utf8")
+    .then((raw) => JSON.parse(raw).sha ?? null)
+    .catch(() => null);
+}
 
 function parseArgs(argv) {
   const args = { engine: "http://127.0.0.1:8188", scenario: "success", timeoutMs: 600_000 };
@@ -103,6 +123,13 @@ async function main() {
     process.stdout.write(USAGE);
     process.exit(args.help ? 0 : 1);
   }
+  // Guard the enum before it reaches a filename: `--scenario ../../x` would
+  // otherwise let writeFile escape FIXTURE_DIR and clobber an unrelated file.
+  if (!SCENARIOS.has(args.scenario)) {
+    throw new Error(
+      `--scenario must be one of ${[...SCENARIOS].join(", ")} (got '${args.scenario}')`,
+    );
+  }
 
   const clientId = randomUUID();
   const httpBase = args.engine.replace(/\/$/, "");
@@ -113,9 +140,13 @@ async function main() {
   const ws = new WebSocket(`${wsBase}/ws?clientId=${encodeURIComponent(clientId)}`);
   ws.binaryType = "arraybuffer";
 
+  // The completion wait owns a timeout timer; `timer` escapes the executor so
+  // every terminal path (including a rejected /prompt that never awaits this)
+  // can clear it in `finally` — a pending timer would keep the process alive.
+  let timer;
   const finished = new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error("timed out waiting for completion")),
+    timer = setTimeout(
+      () => reject(new Error(`timed out after ${args.timeoutMs / 1000}s waiting for completion`)),
       args.timeoutMs,
     );
     ws.addEventListener("error", (e) => reject(new Error(`websocket error: ${e.message ?? e}`)));
@@ -129,31 +160,58 @@ async function main() {
       const message = JSON.parse(ev.data);
       frames.push({ message });
       if (isCompletion(message) || isError(message)) {
-        clearTimeout(timer);
         resolve();
       }
     });
   });
+  // A rejected scenario never awaits `finished`; keep a late ws-error rejection
+  // from surfacing as an unhandledRejection once we've moved past it.
+  finished.catch(() => {});
 
-  await new Promise((r) => ws.addEventListener("open", r, { once: true }));
-
-  // Submit only after the socket is open, or the opening frames are lost — the
-  // same ordering the client enforces (comfy.ts connect).
-  const promptRes = await fetch(`${httpBase}/prompt`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt: workflow, client_id: clientId }),
-  });
-  const prompt = { status: promptRes.status, body: await promptRes.json().catch(() => ({})) };
-  const promptId = prompt.body?.prompt_id ?? null;
-
+  let prompt;
+  let promptId = null;
   let history = { status: 200, body: {} };
-  if (promptRes.ok) {
-    await finished; // wait for the run (or its error) to land
-    const historyRes = await fetch(`${httpBase}/history/${encodeURIComponent(promptId)}`);
-    history = { status: historyRes.status, body: await historyRes.json().catch(() => ({})) };
+  try {
+    await new Promise((resolve, reject) => {
+      ws.addEventListener("open", resolve, { once: true });
+      ws.addEventListener("error", () => reject(new Error(`could not connect to ${wsBase}`)), {
+        once: true,
+      });
+    });
+
+    // Submit only after the socket is open, or the opening frames are lost — the
+    // same ordering the client enforces (comfy.ts connect).
+    const promptRes = await fetch(`${httpBase}/prompt`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: workflow, client_id: clientId }),
+    });
+    prompt = { status: promptRes.status, body: await promptRes.json().catch(() => ({})) };
+    promptId = prompt.body?.prompt_id ?? null;
+
+    if (promptRes.ok) {
+      await finished; // wait for the run (or its error) to land
+      const historyRes = await fetch(`${httpBase}/history/${encodeURIComponent(promptId)}`);
+      history = { status: historyRes.status, body: await historyRes.json().catch(() => ({})) };
+    }
+  } finally {
+    clearTimeout(timer);
+    ws.close();
   }
-  ws.close();
+
+  // Refuse to save a mislabelled recording. When an expected-accepted run was
+  // refused, surface node_errors — the actionable part §8.6 wants, not a status.
+  const terminal = frames.at(-1)?.message ?? null;
+  const outcome = classifyOutcome(prompt, terminal);
+  if (outcome !== args.scenario) {
+    const detail =
+      prompt.status >= 400
+        ? `\n  node_errors: ${JSON.stringify(prompt.body?.node_errors ?? prompt.body)}`
+        : "";
+    throw new Error(
+      `asked to record '${args.scenario}' but the engine produced '${outcome}'.${detail}`,
+    );
+  }
 
   const statsRes = await fetch(`${httpBase}/system_stats`);
   const systemStats = { status: statsRes.status, body: await statsRes.json().catch(() => ({})) };
@@ -163,6 +221,7 @@ async function main() {
       scenario: args.scenario,
       recordedAt: new Date().toISOString(),
       recordedWith: "scripts/record-comfy.mjs",
+      comfyuiSha: await readComfySha(),
       comfyuiVersion: systemStats.body?.system?.comfyui_version ?? null,
       clientId,
       promptId,

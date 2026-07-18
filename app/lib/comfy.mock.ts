@@ -139,6 +139,8 @@ function frameData(frame: RecordedFrame): string | ArrayBuffer {
  */
 export class MockEngine {
   private saved: Saved | null = null;
+  /** The `clientId` the socket connected with, captured to guard the trap below. */
+  private wsClientId: string | null = null;
 
   constructor(private readonly fixture: Fixture) {}
 
@@ -148,9 +150,9 @@ export class MockEngine {
     globalThis.fetch = this.fetch as typeof globalThis.fetch;
     // The stub isn't the full WebSocket type; the client uses only the surface
     // ReplaySocket implements, so the cast is the honest description of that.
-    globalThis.WebSocket = ReplaySocketFor(
-      this.fixture.frames,
-    ) as unknown as typeof globalThis.WebSocket;
+    globalThis.WebSocket = ReplaySocketFor(this.fixture.frames, (url) => {
+      this.wsClientId = new URL(url).searchParams.get("clientId");
+    }) as unknown as typeof globalThis.WebSocket;
     return this;
   }
 
@@ -171,11 +173,17 @@ export class MockEngine {
     return this.fixture.frames.map(frameData);
   }
 
-  private readonly fetch = async (input: string | URL | Request): Promise<Response> => {
+  private readonly fetch = async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const { prompt, history, systemStats } = this.fixture.http;
 
-    if (url.includes("/prompt")) return jsonResponse(prompt);
+    if (url.includes("/prompt")) {
+      this.assertClientIdMatches(init?.body);
+      return jsonResponse(prompt);
+    }
     if (url.includes("/history/")) return jsonResponse(history);
     if (url.includes("/system_stats")) return jsonResponse(systemStats);
     // No pixels in the recording — the client only wraps these bytes in a blob.
@@ -183,13 +191,40 @@ export class MockEngine {
 
     throw new Error(`mock engine: no recorded response for ${url}`);
   };
+
+  /**
+   * The one trap ADR-008's design exists to defeat: the id on the socket's
+   * `clientId` query and the id in `/prompt`'s `client_id` body must be the same
+   * string, or the engine sends progress to a client that isn't listening and
+   * nothing errors (CLAUDE.md). A real engine can't tell you they drifted; this
+   * mock can, so it refuses a `/prompt` whose `client_id` doesn't match the
+   * socket that connected — the two boundaries checked against each other, not
+   * against the fixture (a caller may use a fresh uuid, as {@link generate} does).
+   * Only enforced once a socket has connected; a submit-only test has nothing to
+   * compare against.
+   */
+  private assertClientIdMatches(body: BodyInit | null | undefined) {
+    if (this.wsClientId === null || typeof body !== "string") return;
+    const bodyClientId = (JSON.parse(body) as { client_id?: unknown }).client_id;
+    if (bodyClientId !== this.wsClientId) {
+      throw new Error(
+        `mock engine: client_id mismatch — socket connected as ${JSON.stringify(this.wsClientId)} ` +
+          `but /prompt body carried ${JSON.stringify(bodyClientId)}. ` +
+          `These must be identical or the engine's progress reaches no one.`,
+      );
+    }
+  }
 }
 
-/** A `WebSocket`-shaped constructor bound to one fixture's frames. */
-function ReplaySocketFor(frames: RecordedFrame[]) {
+/**
+ * A `WebSocket`-shaped constructor bound to one fixture's frames, reporting the
+ * URL it was opened with so {@link MockEngine} can read the `clientId` off it.
+ */
+function ReplaySocketFor(frames: RecordedFrame[], onConnect: (url: string) => void) {
   return class extends ReplaySocket {
     constructor(url: string) {
       super(url, frames);
+      onConnect(url);
     }
   };
 }
