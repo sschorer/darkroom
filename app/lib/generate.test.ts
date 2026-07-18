@@ -64,7 +64,12 @@ let fetchMock: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   FakeWebSocket.instances = [];
   vi.stubGlobal("WebSocket", FakeWebSocket);
-  vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: vi.fn(() => "blob:mock-url") }));
+  // A derived constructor, not `Object.assign(URL, …)`: mutating the native URL
+  // would outlive `vi.unstubAllGlobals()` and leak `createObjectURL` into other
+  // tests. This subclass carries the mock and is discarded on unstub.
+  const TestURL = class extends URL {};
+  Object.defineProperty(TestURL, "createObjectURL", { value: vi.fn(() => "blob:mock-url") });
+  vi.stubGlobal("URL", TestURL);
 
   // Default: a well-behaved engine. Individual tests override.
   fetchMock = vi.fn(async (input: string | URL) => {
@@ -72,10 +77,15 @@ beforeEach(() => {
     if (url.includes("/prompt")) return jsonRes({ prompt_id: "P1" });
     if (url.includes("/history/")) {
       return jsonRes({
-        P1: { outputs: { "9": { images: [{ filename: "darkroom_1_.png", subfolder: "", type: "output" }] } } },
+        P1: {
+          outputs: {
+            "9": { images: [{ filename: "darkroom_1_.png", subfolder: "", type: "output" }] },
+          },
+        },
       });
     }
-    if (url.includes("/view")) return { ok: true, status: 200, blob: async () => new Blob(["x"]) } as Response;
+    if (url.includes("/view"))
+      return { ok: true, status: 200, blob: async () => new Blob(["x"]) } as Response;
     throw new Error(`unexpected fetch: ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -87,22 +97,51 @@ afterEach(() => {
 });
 
 describe("generate", () => {
-  it("returns a blob URL and reports progress, with events arriving before submit resolves", async () => {
+  it("returns a blob URL and reports progress, with events arriving during the POST", async () => {
+    // Hold the /prompt response open so events can genuinely arrive while the
+    // POST is in flight — the window where `submittedId` is still null and
+    // events must be buffered rather than processed or dropped.
+    let releasePrompt!: () => void;
+    const promptInFlight = new Promise<void>((r) => (releasePrompt = r));
+    fetchMock.mockImplementation(async (input: string | URL) => {
+      const url = String(input);
+      if (url.includes("/prompt")) {
+        await promptInFlight;
+        return jsonRes({ prompt_id: "P1" });
+      }
+      if (url.includes("/history/")) {
+        return jsonRes({
+          P1: {
+            outputs: {
+              "9": { images: [{ filename: "darkroom_1_.png", subfolder: "", type: "output" }] },
+            },
+          },
+        });
+      }
+      return { ok: true, status: 200, blob: async () => new Blob(["x"]) } as Response;
+    });
+
     const onProgress = vi.fn();
     const p = generate("a cat", onProgress);
 
     await flush(); // startEngine + connect: the socket now exists
     socket().open();
-    // These land while submit()'s POST is in flight — they must be buffered,
-    // then replayed once the prompt id is known, not dropped.
+    await flush(); // generate reaches submit(): the /prompt POST is now pending
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/prompt"), expect.anything());
+
+    // Emitted while the POST hangs — submittedId is still null, so these must
+    // be buffered and replayed once the id is known, not lost.
     socket().send({ type: "progress", data: { value: 2, max: 4, prompt_id: "P1" } });
     socket().send({ type: "executing", data: { node: null, prompt_id: "P1" } });
+    releasePrompt();
 
     await expect(p).resolves.toBe("blob:mock-url");
     expect(onProgress).toHaveBeenCalledWith({ value: 2, max: 4 });
     // The /prompt body carried our client id (the trap ComfyClient guards).
     const promptCall = fetchMock.mock.calls.find(([u]) => String(u).includes("/prompt"));
-    expect(JSON.parse((promptCall![1] as RequestInit).body as string).client_id).toBeTypeOf("string");
+    expect(JSON.parse((promptCall![1] as RequestInit).body as string).client_id).toBeTypeOf(
+      "string",
+    );
   });
 
   it("ignores an idle-queue notice that arrives before our prompt runs", async () => {
@@ -122,7 +161,12 @@ describe("generate", () => {
     fetchMock.mockImplementation(async (input: string | URL) => {
       if (String(input).includes("/prompt")) {
         return jsonRes(
-          { error: { message: "validation failed" }, node_errors: { "10": { class_type: "UNETLoader", errors: [{ message: "Value not in list" }] } } },
+          {
+            error: { message: "validation failed" },
+            node_errors: {
+              "10": { class_type: "UNETLoader", errors: [{ message: "Value not in list" }] },
+            },
+          },
           false,
           400,
         );
