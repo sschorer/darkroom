@@ -16,3 +16,8 @@ app/lib/generated
 # either produces churn nobody asked for and reviews as noise.
 *.md
 .github/
+
+# Design mockups under docs/ are exported reference artifacts — the mockup's
+# exact bytes are the source of truth (see `docs/Milestone 2 - GitHub issues.md`),
+# not code Prettier should restyle. Same call as the prose above.
+docs/*.html
