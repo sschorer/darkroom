@@ -161,6 +161,15 @@ pub async fn download_model<R: Runtime>(
     state: State<'_, Downloads>,
     files: Vec<FileSpec>,
 ) -> Result<DownloadOutcome, String> {
+    // Re-check every URL at the IPC boundary before anything else (§8.4). The
+    // schema already confines a manifest to allowlisted https hosts (ADR-005),
+    // but a compromised renderer can hand-build a `FileSpec` and call straight
+    // in — so without this the command is a blind-SSRF primitive. Validated up
+    // front, before the slot is claimed or a request is built.
+    for file in &files {
+        downloads::check_url(&file.url)?;
+    }
+
     // Fail the cheap, non-guarded prerequisites before claiming the slot, so an
     // early error never strands a stored sender that would wedge the next call.
     let paths = Paths::resolve(&app).map_err(|e| e.to_string())?;

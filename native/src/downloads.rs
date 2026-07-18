@@ -187,6 +187,52 @@ pub fn emit<R: Runtime>(app: &AppHandle<R>, progress: DownloadProgress) {
     let _ = app.emit(EVENT, progress);
 }
 
+/// Hosts a weight download may target.
+///
+/// This mirrors `registry.schema.ts`'s `ALLOWED_HOSTS`, and the duplication is
+/// deliberate: the schema is the *authoring* gate — it fails CI on a manifest
+/// naming an off-list host (ADR-005) — but a compromised renderer can call
+/// `download_model` directly with a hand-built `FileSpec`, bypassing the schema
+/// entirely. The IPC boundary is a surface (§8.4), so the host is checked again
+/// here, natively, before a single request leaves the machine. Without it the
+/// command is a blind-SSRF primitive: a renderer could point it at
+/// `https://127.0.0.1:…` or a link-local metadata address and read the response
+/// timing. Both lists are three entries; a divergence only ever tightens or
+/// loosens the same small trust set, and either way this one is the one that
+/// actually gates the network.
+pub const ALLOWED_HOSTS: &[&str] = &[
+    "huggingface.co",
+    "cdn-lfs.huggingface.co",
+    "cdn-lfs-us-1.hf.co",
+];
+
+/// Refuses a download URL that a schema-valid manifest could never carry.
+///
+/// Two checks, both the renderer could otherwise subvert: the scheme must be
+/// `https` (so a downgraded `http://127.0.0.1` can't reach a loopback service),
+/// and the host must be on [`ALLOWED_HOSTS`]. The *initial* URL is what the
+/// renderer controls, so validating it is what closes the SSRF surface — a
+/// redirect from an allowlisted HF host is HF's to choose and resolves within
+/// its own (also allowlisted) CDN, not a hop a renderer can aim inward.
+pub fn check_url(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|_| format!("refusing to download {url}: it is not a valid URL"))?;
+
+    if parsed.scheme() != "https" {
+        return Err(format!(
+            "refusing to download {url}: only https downloads are allowed"
+        ));
+    }
+
+    match parsed.host_str() {
+        Some(host) if ALLOWED_HOSTS.contains(&host) => Ok(()),
+        other => Err(format!(
+            "refusing to download {url}: {} is not an allowed download host",
+            other.unwrap_or("that host")
+        )),
+    }
+}
+
 /// Resolves a manifest `dest` to an absolute path under `models_dir`, refusing
 /// anything that would escape it.
 ///
@@ -439,6 +485,34 @@ mod tests {
         assert!(resolve_dest(dir, "models/../engine/main.py").is_err());
         assert!(resolve_dest(dir, "engine/main.py").is_err());
         assert!(resolve_dest(dir, "models/").is_err());
+    }
+
+    // ------------------------------------------------------------------
+    // check_url: the SSRF gate at the IPC surface. A schema-valid manifest can
+    // only carry these, but a compromised renderer is not bound by the schema.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn an_allowlisted_https_host_passes() {
+        assert!(check_url("https://huggingface.co/org/model/resolve/main/x.safetensors").is_ok());
+        assert!(check_url("https://cdn-lfs.huggingface.co/repos/x").is_ok());
+    }
+
+    #[test]
+    fn a_loopback_or_off_list_host_is_refused() {
+        // The blind-SSRF payloads the gate exists to stop.
+        assert!(check_url("https://127.0.0.1/x").is_err());
+        assert!(check_url("https://169.254.169.254/latest/meta-data").is_err());
+        assert!(check_url("https://evil.example.com/x.safetensors").is_err());
+    }
+
+    #[test]
+    fn a_non_https_url_is_refused_even_on_an_allowlisted_host() {
+        // A downgrade to http on an allowed host must still fail — http to a name
+        // that resolves inward is the same reach as http to a raw address.
+        assert!(check_url("http://huggingface.co/x").is_err());
+        assert!(check_url("ftp://huggingface.co/x").is_err());
+        assert!(check_url("not a url").is_err());
     }
 
     // ------------------------------------------------------------------
