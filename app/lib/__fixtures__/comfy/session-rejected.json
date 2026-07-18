@@ -1,0 +1,66 @@
+{
+  "meta": {
+    "scenario": "rejected",
+    "note": "POST /prompt refused before running: HTTP 400 carrying node_errors. The engine names the offending node; no run happens, so the socket only carries its opening status.",
+    "comfyuiSha": "700821e1364eaab0e8f21c538a2131719fec57bf",
+    "clientId": "rec-2222-2222-2222",
+    "promptId": null,
+    "provenance": "See __fixtures__/comfy/README.md. The 400 body shape ({error, node_errors}) is server.py's own; node_errors' per-node {class_type, errors:[{type, message, details, extra_info}]} shape is what /prompt returns on validation failure."
+  },
+  "http": {
+    "prompt": {
+      "status": 400,
+      "body": {
+        "error": {
+          "type": "prompt_outputs_failed_validation",
+          "message": "Prompt outputs failed validation",
+          "details": "",
+          "extra_info": {}
+        },
+        "node_errors": {
+          "10": {
+            "class_type": "UNETLoader",
+            "errors": [
+              {
+                "type": "value_not_in_list",
+                "message": "Value not in list",
+                "details": "unet_name: 'flux2-klein.safetensors' not in ['flux1-dev.safetensors']",
+                "extra_info": {
+                  "input_name": "unet_name",
+                  "input_config": null,
+                  "received_value": "flux2-klein.safetensors"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "history": { "status": 200, "body": {} },
+    "systemStats": {
+      "status": 200,
+      "body": {
+        "system": { "os": "posix", "comfyui_version": "0.3.60" },
+        "devices": [
+          {
+            "name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+            "type": "cuda",
+            "index": 0,
+            "vram_total": 25757220864,
+            "vram_free": 24373592064,
+            "torch_vram_total": 268435456,
+            "torch_vram_free": 33554432
+          }
+        ]
+      }
+    }
+  },
+  "frames": [
+    {
+      "message": {
+        "type": "status",
+        "data": { "status": { "exec_info": { "queue_remaining": 0 } }, "sid": "rec-2222-2222-2222" }
+      }
+    }
+  ]
+}

@@ -1,0 +1,215 @@
+{
+  "meta": {
+    "scenario": "success",
+    "note": "One full generation, first frame to completion. Exercises progress and the executing:{node:null} completion signal.",
+    "comfyuiSha": "700821e1364eaab0e8f21c538a2131719fec57bf",
+    "clientId": "rec-1111-1111-1111",
+    "promptId": "rec-success-0001",
+    "provenance": "See __fixtures__/comfy/README.md. Message shapes verified against ComfyUI @ this sha (server.py send_json, execution.py, comfy_execution/progress.py, main.py hijack_progress). Refresh against a live engine with scripts/record-comfy.mjs."
+  },
+  "http": {
+    "prompt": {
+      "status": 200,
+      "body": { "prompt_id": "rec-success-0001", "number": 1, "node_errors": {} }
+    },
+    "history": {
+      "status": 200,
+      "body": {
+        "rec-success-0001": {
+          "prompt": [1, "rec-success-0001", {}, { "client_id": "rec-1111-1111-1111" }, ["9"]],
+          "outputs": {
+            "9": {
+              "images": [{ "filename": "darkroom_00001_.png", "subfolder": "", "type": "output" }]
+            }
+          },
+          "status": {
+            "status_str": "success",
+            "completed": true,
+            "messages": [
+              ["execution_start", { "prompt_id": "rec-success-0001", "timestamp": 1721300000000 }],
+              ["execution_success", { "prompt_id": "rec-success-0001", "timestamp": 1721300012800 }]
+            ]
+          }
+        }
+      }
+    },
+    "systemStats": {
+      "status": 200,
+      "body": {
+        "system": {
+          "os": "posix",
+          "ram_total": 67404689408,
+          "ram_free": 41231704064,
+          "comfyui_version": "0.3.60",
+          "python_version": "3.12.7 (main)",
+          "pytorch_version": "2.8.0+cu129",
+          "embedded_python": false,
+          "argv": ["main.py", "--enable-cors-header", "--port", "8188"]
+        },
+        "devices": [
+          {
+            "name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+            "type": "cuda",
+            "index": 0,
+            "vram_total": 25757220864,
+            "vram_free": 24373592064,
+            "torch_vram_total": 268435456,
+            "torch_vram_free": 33554432
+          }
+        ]
+      }
+    }
+  },
+  "frames": [
+    {
+      "message": {
+        "type": "status",
+        "data": { "status": { "exec_info": { "queue_remaining": 1 } }, "sid": "rec-1111-1111-1111" }
+      }
+    },
+    {
+      "message": {
+        "type": "execution_start",
+        "data": { "prompt_id": "rec-success-0001", "timestamp": 1721300000000 }
+      }
+    },
+    {
+      "message": {
+        "type": "execution_cached",
+        "data": { "nodes": [], "prompt_id": "rec-success-0001", "timestamp": 1721300000010 }
+      }
+    },
+    {
+      "message": {
+        "type": "executing",
+        "data": { "node": "4", "display_node": "4", "prompt_id": "rec-success-0001" }
+      }
+    },
+    {
+      "message": {
+        "type": "executing",
+        "data": { "node": "3", "display_node": "3", "prompt_id": "rec-success-0001" }
+      }
+    },
+    {
+      "message": {
+        "type": "progress_state",
+        "data": {
+          "prompt_id": "rec-success-0001",
+          "nodes": {
+            "3": {
+              "value": 0,
+              "max": 4,
+              "state": "running",
+              "node_id": "3",
+              "prompt_id": "rec-success-0001",
+              "display_node_id": "3",
+              "parent_node_id": null,
+              "real_node_id": "3"
+            }
+          }
+        }
+      }
+    },
+    {
+      "message": {
+        "type": "progress",
+        "data": { "value": 1, "max": 4, "prompt_id": "rec-success-0001", "node": "3" }
+      }
+    },
+    { "binary": 4108 },
+    {
+      "message": {
+        "type": "progress",
+        "data": { "value": 2, "max": 4, "prompt_id": "rec-success-0001", "node": "3" }
+      }
+    },
+    {
+      "message": {
+        "type": "progress_state",
+        "data": {
+          "prompt_id": "rec-success-0001",
+          "nodes": {
+            "3": {
+              "value": 2,
+              "max": 4,
+              "state": "running",
+              "node_id": "3",
+              "prompt_id": "rec-success-0001",
+              "display_node_id": "3",
+              "parent_node_id": null,
+              "real_node_id": "3"
+            }
+          }
+        }
+      }
+    },
+    {
+      "message": {
+        "type": "progress",
+        "data": { "value": 3, "max": 4, "prompt_id": "rec-success-0001", "node": "3" }
+      }
+    },
+    { "binary": 4108 },
+    {
+      "message": {
+        "type": "progress",
+        "data": { "value": 4, "max": 4, "prompt_id": "rec-success-0001", "node": "3" }
+      }
+    },
+    {
+      "message": {
+        "type": "progress_state",
+        "data": {
+          "prompt_id": "rec-success-0001",
+          "nodes": {
+            "3": {
+              "value": 4,
+              "max": 4,
+              "state": "finished",
+              "node_id": "3",
+              "prompt_id": "rec-success-0001",
+              "display_node_id": "3",
+              "parent_node_id": null,
+              "real_node_id": "3"
+            }
+          }
+        }
+      }
+    },
+    {
+      "message": {
+        "type": "executing",
+        "data": { "node": "9", "display_node": "9", "prompt_id": "rec-success-0001" }
+      }
+    },
+    {
+      "message": {
+        "type": "executed",
+        "data": {
+          "node": "9",
+          "display_node": "9",
+          "output": {
+            "images": [{ "filename": "darkroom_00001_.png", "subfolder": "", "type": "output" }]
+          },
+          "prompt_id": "rec-success-0001"
+        }
+      }
+    },
+    {
+      "message": {
+        "type": "execution_success",
+        "data": { "prompt_id": "rec-success-0001", "timestamp": 1721300012800 }
+      }
+    },
+    {
+      "message": {
+        "type": "status",
+        "data": { "status": { "exec_info": { "queue_remaining": 0 } }, "sid": "rec-1111-1111-1111" }
+      }
+    },
+    {
+      "message": { "type": "executing", "data": { "node": null, "prompt_id": "rec-success-0001" } }
+    }
+  ]
+}
