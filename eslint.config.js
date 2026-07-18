@@ -7,7 +7,9 @@ import prettier from "eslint-config-prettier";
 
 export default tseslint.config(
   {
-    ignores: ["dist", "coverage", "native/target"],
+    // app/lib/generated is ts-rs output (ADR-018) — machine-written and diffed
+    // by CI, not ours to lint.
+    ignores: ["dist", "coverage", "native/target", "app/lib/generated"],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

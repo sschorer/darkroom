@@ -95,6 +95,20 @@ jobs:
       - run: cargo test --all-features
         working-directory: native
 
+      # The `ts` feature above regenerated app/lib/generated/ during the test
+      # run. If the checked-in mirror no longer matches the Rust types, someone
+      # changed an IPC struct without regenerating — fail rather than ship a
+      # silent drift across the FFI boundary (ADR-018). Linux only: one runner
+      # is enough to diff, and it sidesteps CRLF churn on the Windows tree.
+      - name: IPC bindings are in sync
+        if: matrix.os == 'ubuntu-22.04'
+        # --intent-to-add so a brand-new generated type that was never committed
+        # shows up in the diff too; a plain `git diff` ignores untracked files
+        # and would pass a missing mirror.
+        run: |
+          git add --intent-to-add app/lib/generated
+          git diff --exit-code -- app/lib/generated
+
   # Proves the thing still bundles. Unsigned, artifacts discarded.
   # Catches "works in dev, explodes in tauri build" before a release tag does.
   build:

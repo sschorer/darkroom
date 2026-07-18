@@ -29,6 +29,14 @@ serde_json = "1"
 # the several children a bootstrap spawns.
 tauri-plugin-shell = "2"
 
+# Enforces one running Darkroom (ADR-017). It is a hard prerequisite of the
+# engine reclaim (ADR-016), not a nicety: a second instance's boot-time
+# `reclaim_stale` would find the first instance's PID file, confirm the identity
+# (it genuinely is our `main.py`, same start time), and `SIGKILL` a live engine
+# mid-generation. Registered first so the second process exits inside the
+# plugin's own setup, before ours runs the reclaim.
+tauri-plugin-single-instance = "2"
+
 # Fetches the ComfyUI tarball. rustls rather than the platform TLS stack: it
 # keeps the Windows and macOS builds free of an OpenSSL dependency, and the
 # hosts we talk to are ours to pin, not the OS trust store's to negotiate.
@@ -46,10 +54,13 @@ tar = "0.4"
 # clippy `-D warnings` failure) in favour of exactly this.
 open = "5"
 
-# The health-poll timer (sidecar.rs). tauri already runs on tokio and reqwest
-# needs its reactor; this makes the direct use of `tokio::time` honest rather
-# than reaching through a transitive dependency.
-tokio = { version = "1", features = ["time"] }
+# The health-poll timer and the process-exit race (sidecar.rs). tauri already
+# runs on tokio and reqwest needs its reactor; this makes the direct use of
+# `tokio::time` and `tokio::sync::oneshot` honest rather than reaching through a
+# transitive dependency. `sync` carries the oneshot the log pump uses to tell the
+# health wait the engine died, and `macros` is the `select!` that races that
+# signal against the socket poll, so a failed boot fails in seconds, not 120s.
+tokio = { version = "1", features = ["time", "sync", "macros"] }
 
 # Digests engine/comfy.lock so `.version` can record *which* pin an install
 # came from, not merely which commit. See engine/bootstrap.rs.
@@ -64,6 +75,20 @@ sha2 = "0.10"
 sysinfo = { version = "0.36", default-features = false, features = ["system"] }
 
 thiserror = "2"
+
+# Generates the TypeScript mirrors of the IPC types (ADR-018) into
+# app/lib/generated/, so the wire contract has one definition instead of a
+# hand-kept copy that drifts silently across the FFI boundary. Optional and
+# behind the `ts` feature: the derives and their export tests compile only under
+# `cargo test --all-features` (where CI regenerates and diffs); a plain `cargo
+# build`/bundle never links ts-rs, keeping it out of the shipped binary.
+ts-rs = { version = "10", optional = true }
+
+[features]
+# On under `cargo test --all-features` (CI, `make rust-test`); off for the
+# bundle. Enabling it turns on the `#[derive(TS)]`/`#[ts(export)]` on the IPC
+# types and their generation tests.
+ts = ["dep:ts-rs"]
 
 [dev-dependencies]
 # paths.rs tests need a real directory to create into; the layout is only

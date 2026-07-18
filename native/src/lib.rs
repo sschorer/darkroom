@@ -91,9 +91,25 @@ fn reclaim_engine<R: Runtime, M: Manager<R>>(manager: &M) {
     }
 }
 
+/// Brings the running window forward when a second launch is turned away.
+///
+/// The single-instance plugin (ADR-017) fires this in the *primary* instance
+/// with the rejected launch's args; the secondary process has already exited by
+/// then. Args and cwd are unused today — Darkroom takes none — so the only thing
+/// to do is surface the window the user already has, best-effort.
+fn on_second_instance<R: Runtime>(app: &AppHandle<R>, _args: Vec<String>, _cwd: String) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_focus();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        // First, before any other plugin or our own setup: a second launch must
+        // be turned away inside this plugin's setup, before ours could run the
+        // engine reclaim and kill the primary's engine (ADR-016, ADR-017).
+        .plugin(tauri_plugin_single_instance::init(on_second_instance))
         .plugin(tauri_plugin_shell::init())
         .menu(build_menu)
         .on_menu_event(handle_menu_event)

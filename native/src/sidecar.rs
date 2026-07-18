@@ -39,6 +39,7 @@ use tauri::async_runtime::Receiver;
 use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
+use tokio::sync::oneshot;
 
 use crate::paths::Paths;
 
@@ -60,7 +61,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The Tauri event each captured log line is emitted on, so a running UI can
-/// show the engine's output live. Mirrored by `app/lib/engine.ts`.
+/// show the engine's output live. The payload type is generated for
+/// `app/lib/engine.ts` by ts-rs (ADR-018); this event *name* is matched by hand
+/// on the TS side.
 pub const LOG_EVENT: &str = "engine://log";
 
 /// Roll the engine log once appending the next line would push it past this.
@@ -130,6 +133,32 @@ pub enum HealthError {
         STARTUP_TIMEOUT.as_secs()
     )]
     Timeout { port: u16 },
+
+    #[error(
+        "the engine exited during startup (code {code:?}, signal {signal:?}) before \
+         it answered on {LOOPBACK}:{port}.\n  \
+         It failed while booting — check the engine log for a Python traceback; a \
+         failing node import is the usual cause."
+    )]
+    Exited {
+        port: u16,
+        code: Option<i32>,
+        signal: Option<i32>,
+    },
+}
+
+/// How the engine process ended, as the log pump ([`pump`]) saw it.
+///
+/// Handed from the pump to the health wait so a boot that dies importing a node
+/// fails in the seconds it actually took, carrying the exit code, rather than
+/// making the frontend wait out the whole [`STARTUP_TIMEOUT`] for a timeout the
+/// process had already decided. The pump watches the *process*; the health poll
+/// watches the *socket*; racing the two is what turns a fast failure into a fast
+/// error (§6.2).
+#[derive(Debug, Clone, Copy)]
+pub struct EngineExit {
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
 }
 
 /// A running engine and the port it was told to serve on.
@@ -197,7 +226,8 @@ pub fn spawn<R: Runtime>(app: &AppHandle<R>, paths: &Paths) -> Result<Engine, Sp
     })
 }
 
-/// Waits until the engine on `port` answers, or gives up after [`STARTUP_TIMEOUT`].
+/// Waits until the engine on `port` answers, the process dies, or the
+/// [`STARTUP_TIMEOUT`] budget runs out — whichever comes first.
 ///
 /// [`spawn`] returns the instant the process exists; this is the other half —
 /// the caller turns a spawned handle into a *ready* one by awaiting this before
@@ -205,12 +235,49 @@ pub fn spawn<R: Runtime>(app: &AppHandle<R>, paths: &Paths) -> Result<Engine, Sp
 /// in boot, so a response to `/system_stats` is the first moment the port is
 /// worth anything.
 ///
-/// Note this watches the socket, not the process: a ComfyUI that dies during
-/// startup simply stops answering and this reports a [`HealthError::Timeout`]
-/// once the budget runs out. The engine log (#8) is where the actual traceback
-/// lands, which is why the error points there.
-pub async fn wait_until_healthy(port: u16) -> Result<(), HealthError> {
-    poll_until_healthy(port, POLL_INTERVAL, STARTUP_TIMEOUT).await
+/// The health *poll* watches the socket, not the process, so on its own a
+/// ComfyUI that dies importing a node would only surface after the full budget
+/// elapsed — two minutes of "Starting…" for a failure the process decided in
+/// three seconds. `exited` closes that gap: the log pump ([`pump`]) fires it the
+/// moment it sees the process terminate, and this races it against the poll, so
+/// a boot that fails fast fails fast (with the exit code, via
+/// [`HealthError::Exited`]). The engine log (#8) is where the actual traceback
+/// lands, which is why every arm's error points there.
+pub async fn wait_until_healthy(
+    port: u16,
+    exited: oneshot::Receiver<EngineExit>,
+) -> Result<(), HealthError> {
+    race_until_healthy(port, POLL_INTERVAL, STARTUP_TIMEOUT, exited).await
+}
+
+/// The socket poll and the process-exit signal, raced with their cadence and
+/// budget injected so tests drive it in milliseconds rather than the two-minute
+/// production timeout.
+async fn race_until_healthy(
+    port: u16,
+    interval: Duration,
+    timeout: Duration,
+    exited: oneshot::Receiver<EngineExit>,
+) -> Result<(), HealthError> {
+    // A dropped sender — the pump ended without ever seeing a `Terminated`
+    // event, which shouldn't happen but the type permits — must not read as an
+    // exit and forge a failure. Fall back to never firing, leaving the poll to
+    // reach its own verdict (a healthy answer, or the timeout).
+    let on_exit = async {
+        match exited.await {
+            Ok(info) => info,
+            Err(_) => std::future::pending::<EngineExit>().await,
+        }
+    };
+
+    tokio::select! {
+        res = poll_until_healthy(port, interval, timeout) => res,
+        info = on_exit => Err(HealthError::Exited {
+            port,
+            code: info.code,
+            signal: info.signal,
+        }),
+    }
 }
 
 /// The health loop with its cadence and budget injected, so tests can drive it
@@ -283,6 +350,7 @@ pub async fn is_responding(port: u16) -> bool {
 /// tracebacks, so the frontend can colour it — hence carrying the distinction
 /// on the wire even though the file keeps the lines verbatim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "./"))]
 #[serde(rename_all = "lowercase")]
 enum Stream {
     Stdout,
@@ -291,10 +359,12 @@ enum Stream {
 
 /// One captured line of engine output, as it crosses to the frontend.
 ///
-/// `{ "stream": "stderr", "line": "…" }`. Mirrored by `app/lib/engine.ts`; the
-/// serialize tests below pin the shape so a rename can't silently break the log
-/// view, the same guard `progress.rs` gives its enum.
+/// `{ "stream": "stderr", "line": "…" }`. Its TS type is generated by ts-rs
+/// (ADR-018); the serialize tests below pin the actual serde JSON — the lowercase
+/// `stream` tags, the two fields — the half ts-rs can't see, the same guard
+/// `progress.rs` gives its enum.
 #[derive(Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "./"))]
 struct LogLine {
     stream: Stream,
     line: String,
@@ -359,14 +429,34 @@ fn decode(bytes: &[u8]) -> String {
 /// traceback survives the window closing, and on [`LOG_EVENT`] so a running UI
 /// can show it live (§8.6). The emit is best-effort for the reason progress is:
 /// nothing about keeping the pipe drained may depend on anyone listening.
+///
+/// The pump also owns the one place that sees the process end: on the
+/// `Terminated` event it fires `on_exit` so a health wait racing this can fail
+/// the instant the engine dies (see [`wait_until_healthy`]). Firing is
+/// best-effort too — once the engine is healthy the receiver is long dropped,
+/// and a send to a dropped receiver is the ordinary, ignorable case.
 pub async fn pump<R: Runtime>(
     app: AppHandle<R>,
     mut events: Receiver<CommandEvent>,
     log_path: PathBuf,
+    on_exit: oneshot::Sender<EngineExit>,
 ) {
     let mut log = RotatingLog::open(log_path, LOG_MAX_BYTES, LOG_KEEP);
+    // Taken on the first `Terminated`; a `oneshot::Sender` can only send once,
+    // and the process terminates once.
+    let mut on_exit = Some(on_exit);
 
     while let Some(event) = events.recv().await {
+        // Signal the exit *before* logging it, so the health wait is released as
+        // early as possible; the same event still becomes a log line below.
+        if let CommandEvent::Terminated(payload) = &event {
+            if let Some(tx) = on_exit.take() {
+                let _ = tx.send(EngineExit {
+                    code: payload.code,
+                    signal: payload.signal,
+                });
+            }
+        }
         if let Some(entry) = log_entry(event) {
             // The file gets the line verbatim so a multi-line Python traceback
             // reads as one; the stream tag rides along only to the frontend.
@@ -590,9 +680,11 @@ fn write_pid_file(path: &Path, pid: u32) -> Result<(), PidError> {
 /// best-effort: a teardown that can't read or delete the file must still let the
 /// app exit.
 ///
-/// Assumes one running instance. The reclaim cannot tell *our* leaked engine
-/// from one a second Darkroom legitimately started; enforcing a single instance
-/// is a separate concern, and the whole appdata tree already assumes it.
+/// Requires one running instance, now enforced rather than assumed (ADR-017):
+/// the single-instance plugin turns a second launch away before it could reach
+/// this. That enforcement is load-bearing here — without it, a second Darkroom's
+/// boot reclaim would find the first's PID file, confirm the identity (same
+/// `main.py`, same start time), and `SIGKILL` a live engine mid-generation.
 pub fn reclaim_stale(paths: &Paths) {
     let path = paths.engine_pid();
 
@@ -841,14 +933,84 @@ mod tests {
         );
     }
 
+    /// The reason the exit race exists: a ComfyUI that dies importing a node
+    /// must surface as an `Exited` error in the seconds it took, not after the
+    /// full startup budget. A dead port would otherwise burn the whole timeout;
+    /// firing the exit signal must beat it and carry the code.
+    #[test]
+    fn exits_at_once_when_the_process_dies_before_answering() {
+        // A refused port stands in for an engine that never binds; without the
+        // exit signal this would run to the (here, long) timeout.
+        let dead = free_port().expect("a free port");
+        let (tx, rx) = oneshot::channel();
+        tx.send(EngineExit {
+            code: Some(1),
+            signal: None,
+        })
+        .expect("the receiver is still live");
+
+        let result = tauri::async_runtime::block_on(race_until_healthy(
+            dead,
+            Duration::from_millis(20),
+            Duration::from_secs(30),
+            rx,
+        ));
+
+        assert!(
+            matches!(result, Err(HealthError::Exited { port, code: Some(1), signal: None }) if port == dead),
+            "a process that exits must fail fast as Exited with its code, got {result:?}"
+        );
+    }
+
+    /// A health answer must win even when an exit could arrive: an engine that
+    /// comes up cleanly is `Ok`, and the retained sender (never fired) must not
+    /// turn that into a failure.
+    #[test]
+    fn a_healthy_answer_wins_over_a_pending_exit() {
+        let port = serve_one_ok();
+        let (_tx, rx) = oneshot::channel();
+
+        let result = tauri::async_runtime::block_on(race_until_healthy(
+            port,
+            Duration::from_millis(20),
+            Duration::from_secs(5),
+            rx,
+        ));
+
+        assert!(result.is_ok(), "a live engine must be Ok, got {result:?}");
+    }
+
+    /// A dropped sender — the pump gone without ever seeing a `Terminated` —
+    /// must not read as an exit. The poll runs to its own verdict, here a
+    /// timeout, rather than a forged `Exited`.
+    #[test]
+    fn a_dropped_exit_sender_falls_back_to_the_poll() {
+        let dead = free_port().expect("a free port");
+        let (tx, rx) = oneshot::channel::<EngineExit>();
+        drop(tx);
+
+        let result = tauri::async_runtime::block_on(race_until_healthy(
+            dead,
+            Duration::from_millis(5),
+            Duration::from_millis(40),
+            rx,
+        ));
+
+        assert!(
+            matches!(result, Err(HealthError::Timeout { port }) if port == dead),
+            "a dropped sender must leave the poll to time out, not forge an exit, got {result:?}"
+        );
+    }
+
     // --- The log pump ---------------------------------------------------------
 
     use std::fs;
 
-    /// `LogLine` is the wire contract `app/lib/engine.ts` mirrors by hand. These
-    /// pin `stream` to lowercase tags and the two-field shape so a rename fails
-    /// here rather than silently emptying the log view — the same guard
-    /// `progress.rs` gives its enum.
+    /// `LogLine`'s TS type is generated by ts-rs (ADR-018), which checks the
+    /// type structure. These pin the complementary half — the actual serde JSON:
+    /// `stream` as lowercase tags and the two-field shape — so a serde change
+    /// ts-rs can't see still fails here rather than silently emptying the log
+    /// view, the same guard `progress.rs` gives its enum.
     #[test]
     fn a_log_line_serializes_with_stream_and_line() {
         assert_eq!(
