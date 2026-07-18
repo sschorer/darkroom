@@ -27,6 +27,7 @@
 //! drives both, and the identity check keeps a recycled PID from costing an
 //! innocent process its life.
 
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::net::{Ipv4Addr, TcpListener};
@@ -53,6 +54,16 @@ const HEALTH_PATH: &str = "/system_stats";
 
 /// How often to re-probe while the engine is starting.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// How many trailing engine-output lines a startup-exit error carries (§8.6).
+/// Enough to hold a Python traceback, bounded so a chatty boot can't grow the
+/// error without limit — the same budget `bootstrap.rs` gives its uv tail.
+const EXIT_TAIL_LINES: usize = 40;
+
+/// Per-line byte cap for that tail, so a single newline-less blob can't ride in
+/// whole. The engine's output is line-split by the plugin already; this is the
+/// belt-and-suspenders against a pathological line.
+const EXIT_TAIL_LINE_BYTES: usize = 2 * 1024;
 
 /// The whole startup budget. ComfyUI's first boot imports torch and every
 /// custom node, which is slow; 120s is generous for that yet short enough that a
@@ -137,28 +148,35 @@ pub enum HealthError {
     #[error(
         "the engine exited during startup (code {code:?}, signal {signal:?}) before \
          it answered on {LOOPBACK}:{port}.\n  \
-         It failed while booting — check the engine log for a Python traceback; a \
-         failing node import is the usual cause."
+         A failing node import is the usual cause; the full log is at Help → Open \
+         Logs. Recent engine output:\n\n{tail}"
     )]
     Exited {
         port: u16,
         code: Option<i32>,
         signal: Option<i32>,
+        /// The engine's last lines before it died — the traceback, usually. Kept
+        /// on the error so the message is actionable on its own (§8.6), not a
+        /// bare exit code pointing elsewhere.
+        tail: String,
     },
 }
 
 /// How the engine process ended, as the log pump ([`pump`]) saw it.
 ///
 /// Handed from the pump to the health wait so a boot that dies importing a node
-/// fails in the seconds it actually took, carrying the exit code, rather than
-/// making the frontend wait out the whole [`STARTUP_TIMEOUT`] for a timeout the
-/// process had already decided. The pump watches the *process*; the health poll
-/// watches the *socket*; racing the two is what turns a fast failure into a fast
-/// error (§6.2).
-#[derive(Debug, Clone, Copy)]
+/// fails in the seconds it actually took — carrying the exit code *and* the tail
+/// of what the engine printed before dying — rather than making the frontend
+/// wait out the whole [`STARTUP_TIMEOUT`] for a timeout the process had already
+/// decided. The pump watches the *process* (and holds its recent output); the
+/// health poll watches the *socket*; racing the two is what turns a fast failure
+/// into a fast, actionable error (§6.2, §8.6).
+#[derive(Debug, Clone)]
 pub struct EngineExit {
     pub code: Option<i32>,
     pub signal: Option<i32>,
+    /// The last [`EXIT_TAIL_LINES`] the engine emitted before it terminated.
+    pub tail: String,
 }
 
 /// A running engine and the port it was told to serve on.
@@ -276,6 +294,7 @@ async fn race_until_healthy(
             port,
             code: info.code,
             signal: info.signal,
+            tail: info.tail,
         }),
     }
 }
@@ -432,7 +451,9 @@ fn decode(bytes: &[u8]) -> String {
 ///
 /// The pump also owns the one place that sees the process end: on the
 /// `Terminated` event it fires `on_exit` so a health wait racing this can fail
-/// the instant the engine dies (see [`wait_until_healthy`]). Firing is
+/// the instant the engine dies (see [`wait_until_healthy`]). It carries the
+/// engine's recent output along, so a startup death is an actionable error with
+/// the traceback in it, not a bare code pointing at a log (§8.6). Firing is
 /// best-effort too — once the engine is healthy the receiver is long dropped,
 /// and a send to a dropped receiver is the ordinary, ignorable case.
 pub async fn pump<R: Runtime>(
@@ -445,15 +466,22 @@ pub async fn pump<R: Runtime>(
     // Taken on the first `Terminated`; a `oneshot::Sender` can only send once,
     // and the process terminates once.
     let mut on_exit = Some(on_exit);
+    // A bounded window of the engine's most recent lines, so the exit can carry
+    // the traceback that preceded it. The lines arrive in order, so by the time
+    // `Terminated` lands this already holds the death's cause.
+    let mut recent: VecDeque<String> = VecDeque::with_capacity(EXIT_TAIL_LINES + 1);
 
     while let Some(event) = events.recv().await {
         // Signal the exit *before* logging it, so the health wait is released as
-        // early as possible; the same event still becomes a log line below.
+        // early as possible; the same event still becomes a log line below. The
+        // tail is what preceded this terminate — the exit line itself is
+        // redundant with the code already in the error.
         if let CommandEvent::Terminated(payload) = &event {
             if let Some(tx) = on_exit.take() {
                 let _ = tx.send(EngineExit {
                     code: payload.code,
                     signal: payload.signal,
+                    tail: Vec::from(std::mem::take(&mut recent)).join("\n"),
                 });
             }
         }
@@ -461,9 +489,37 @@ pub async fn pump<R: Runtime>(
             // The file gets the line verbatim so a multi-line Python traceback
             // reads as one; the stream tag rides along only to the frontend.
             log.write_line(&entry.line);
+            push_tail(&mut recent, &entry.line);
             let _ = app.emit(LOG_EVENT, &entry);
         }
     }
+}
+
+/// Pushes a line onto the exit-tail ring, evicting the oldest past the cap and
+/// clipping any single line to [`EXIT_TAIL_LINE_BYTES`] so a runaway line can't
+/// grow the tail unbounded.
+fn push_tail(recent: &mut VecDeque<String>, line: &str) {
+    recent.push_back(clip_line(line, EXIT_TAIL_LINE_BYTES));
+    if recent.len() > EXIT_TAIL_LINES {
+        recent.pop_front();
+    }
+}
+
+/// Truncates a line to `max` bytes on a char boundary, marking a cut with an
+/// ellipsis. Runs on lossily-decoded subprocess output, so it must never split a
+/// codepoint. Short lines pass through untouched.
+fn clip_line(line: &str, max: usize) -> String {
+    if line.len() <= max {
+        return line.to_owned();
+    }
+    let mut end = max;
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut clipped = String::with_capacity(end + '…'.len_utf8());
+    clipped.push_str(&line[..end]);
+    clipped.push('…');
+    clipped
 }
 
 /// An append-only log that rolls itself over once it grows past a size cap,
@@ -946,6 +1002,7 @@ mod tests {
         tx.send(EngineExit {
             code: Some(1),
             signal: None,
+            tail: String::new(),
         })
         .expect("the receiver is still live");
 
@@ -957,9 +1014,62 @@ mod tests {
         ));
 
         assert!(
-            matches!(result, Err(HealthError::Exited { port, code: Some(1), signal: None }) if port == dead),
+            matches!(result, Err(HealthError::Exited { port, code: Some(1), signal: None, .. }) if port == dead),
             "a process that exits must fail fast as Exited with its code, got {result:?}"
         );
+    }
+
+    /// §8.6: the fast-fail error must be actionable on its own. The tail the pump
+    /// carried — the traceback that preceded the exit — has to reach the message
+    /// the user sees, not just an exit code pointing at a log.
+    #[test]
+    fn the_exit_error_carries_the_engine_output_tail() {
+        let dead = free_port().expect("a free port");
+        let (tx, rx) = oneshot::channel();
+        tx.send(EngineExit {
+            code: Some(1),
+            signal: None,
+            tail: "ModuleNotFoundError: No module named 'foo'".to_owned(),
+        })
+        .expect("the receiver is still live");
+
+        let result = tauri::async_runtime::block_on(race_until_healthy(
+            dead,
+            Duration::from_millis(20),
+            Duration::from_secs(30),
+            rx,
+        ));
+
+        let message = match result {
+            Err(err @ HealthError::Exited { .. }) => err.to_string(),
+            other => panic!("expected an Exited error, got {other:?}"),
+        };
+        assert!(
+            message.contains("ModuleNotFoundError: No module named 'foo'"),
+            "the engine's traceback tail must reach the user, got: {message}"
+        );
+    }
+
+    /// The pump's tail ring keeps the last lines (a traceback ends at the bottom,
+    /// which is the half worth keeping) and clips a pathological single line so a
+    /// newline-less blob can't grow the exit payload without bound.
+    #[test]
+    fn the_exit_tail_keeps_the_last_lines_and_clips_long_ones() {
+        let mut recent = VecDeque::new();
+        for i in 0..(EXIT_TAIL_LINES + 20) {
+            push_tail(&mut recent, &format!("line {i}"));
+        }
+        assert_eq!(recent.len(), EXIT_TAIL_LINES, "the ring stays bounded");
+        assert_eq!(
+            recent.back().map(String::as_str),
+            Some(format!("line {}", EXIT_TAIL_LINES + 19).as_str()),
+            "the newest line — where a traceback's cause sits — is kept",
+        );
+
+        let mut big = VecDeque::new();
+        push_tail(&mut big, &"x".repeat(10 * EXIT_TAIL_LINE_BYTES));
+        assert!(big[0].ends_with('…'), "an oversized line is clipped");
+        assert!(big[0].len() <= EXIT_TAIL_LINE_BYTES + '…'.len_utf8());
     }
 
     /// A health answer must win even when an exit could arrive: an engine that
