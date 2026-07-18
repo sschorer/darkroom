@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseRegistry } from "./registry";
+import { parseRegistry, selectAvailable } from "./registry";
 import type { Manifest } from "./registry.schema";
 
 /** A minimal manifest the schema accepts, spread-overridable per case. */
@@ -43,7 +43,7 @@ describe("parseRegistry", () => {
         }),
       }),
     );
-    expect(parsed.map((m) => m.id)).toEqual(["wan22", "flux2-klein"]); // sorted by path
+    expect(parsed.map((e) => e.manifest.id)).toEqual(["wan22", "flux2-klein"]); // sorted by path
   });
 
   it("returns manifests in a stable, path-sorted order", () => {
@@ -53,7 +53,7 @@ describe("parseRegistry", () => {
         "../../registry/alpha/manifest.json": manifest({ id: "alpha" }),
       }),
     );
-    expect(parsed.map((m) => m.id)).toEqual(["alpha", "zebra"]);
+    expect(parsed.map((e) => e.manifest.id)).toEqual(["alpha", "zebra"]);
   });
 
   it("throws, naming the file, when a bundled manifest breaks the schema", () => {
@@ -81,5 +81,50 @@ describe("parseRegistry", () => {
 
   it("is empty for an empty bundle", () => {
     expect(parseRegistry(modules({}))).toEqual([]);
+  });
+});
+
+describe("selectAvailable", () => {
+  it("offers enabled, non-staged models", () => {
+    const available = selectAvailable(
+      parseRegistry(
+        modules({
+          "../../registry/flux2-klein/manifest.json": manifest({ id: "flux2-klein" }),
+          "../../registry/_staged/wan22/manifest.json": manifest({
+            id: "wan22",
+            enabled: false,
+          }),
+        }),
+      ),
+    );
+    expect(available.map((m) => m.id)).toEqual(["flux2-klein"]);
+  });
+
+  it("holds back a staged model even if it reads enabled", () => {
+    // The path is the structural truth: promoting a staged model is an ADR-006
+    // amendment, not a flipped boolean, so a mislabelled _staged/ manifest must
+    // never reach the picker.
+    const available = selectAvailable(
+      parseRegistry(
+        modules({
+          "../../registry/_staged/wan22/manifest.json": manifest({ id: "wan22", enabled: true }),
+        }),
+      ),
+    );
+    expect(available).toEqual([]);
+  });
+
+  it("excludes a disabled shipped model", () => {
+    const available = selectAvailable(
+      parseRegistry(
+        modules({
+          "../../registry/flux2-klein/manifest.json": manifest({
+            id: "flux2-klein",
+            enabled: false,
+          }),
+        }),
+      ),
+    );
+    expect(available).toEqual([]);
   });
 });
