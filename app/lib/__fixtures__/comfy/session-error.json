@@ -1,0 +1,112 @@
+{
+  "meta": {
+    "scenario": "error",
+    "note": "A node throws in Python mid-run: the prompt was accepted (200), sampling starts, then execution_error names the failing node and reason. This is the OOM-style failure §8.6's error contract must surface.",
+    "comfyuiSha": "700821e1364eaab0e8f21c538a2131719fec57bf",
+    "clientId": "rec-3333-3333-3333",
+    "promptId": "rec-error-0001",
+    "provenance": "See __fixtures__/comfy/README.md. execution_error's key set ({prompt_id, node_id, node_type, executed, exception_message, exception_type, traceback, current_inputs, current_outputs, timestamp}) is execution.py's `mes` dict, wrapped by add_message which adds `timestamp`."
+  },
+  "http": {
+    "prompt": {
+      "status": 200,
+      "body": { "prompt_id": "rec-error-0001", "number": 1, "node_errors": {} }
+    },
+    "history": {
+      "status": 200,
+      "body": {
+        "rec-error-0001": {
+          "prompt": [1, "rec-error-0001", {}, { "client_id": "rec-3333-3333-3333" }, ["9"]],
+          "outputs": {},
+          "status": {
+            "status_str": "error",
+            "completed": false,
+            "messages": [
+              ["execution_start", { "prompt_id": "rec-error-0001", "timestamp": 1721400000000 }],
+              [
+                "execution_error",
+                {
+                  "prompt_id": "rec-error-0001",
+                  "node_id": "3",
+                  "node_type": "KSampler",
+                  "timestamp": 1721400003200
+                }
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "systemStats": {
+      "status": 200,
+      "body": {
+        "system": { "os": "posix", "comfyui_version": "0.3.60" },
+        "devices": [
+          {
+            "name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+            "type": "cuda",
+            "index": 0,
+            "vram_total": 25757220864,
+            "vram_free": 24373592064,
+            "torch_vram_total": 268435456,
+            "torch_vram_free": 33554432
+          }
+        ]
+      }
+    }
+  },
+  "frames": [
+    {
+      "message": {
+        "type": "status",
+        "data": { "status": { "exec_info": { "queue_remaining": 1 } }, "sid": "rec-3333-3333-3333" }
+      }
+    },
+    {
+      "message": {
+        "type": "execution_start",
+        "data": { "prompt_id": "rec-error-0001", "timestamp": 1721400000000 }
+      }
+    },
+    {
+      "message": {
+        "type": "execution_cached",
+        "data": { "nodes": [], "prompt_id": "rec-error-0001", "timestamp": 1721400000010 }
+      }
+    },
+    {
+      "message": {
+        "type": "executing",
+        "data": { "node": "3", "display_node": "3", "prompt_id": "rec-error-0001" }
+      }
+    },
+    {
+      "message": {
+        "type": "progress",
+        "data": { "value": 1, "max": 20, "prompt_id": "rec-error-0001", "node": "3" }
+      }
+    },
+    {
+      "message": {
+        "type": "execution_error",
+        "data": {
+          "prompt_id": "rec-error-0001",
+          "node_id": "3",
+          "node_type": "KSampler",
+          "executed": [],
+          "exception_message": "Allocation on device 0 would exceed allowed memory (out of memory)",
+          "exception_type": "torch.cuda.OutOfMemoryError",
+          "traceback": [
+            "Traceback (most recent call last):",
+            "  File \"execution.py\", line 361, in execute",
+            "  File \"nodes.py\", line 1520, in sample",
+            "torch.cuda.OutOfMemoryError: CUDA out of memory."
+          ],
+          "current_inputs": {},
+          "current_outputs": [],
+          "timestamp": 1721400003200
+        }
+      }
+    }
+  ]
+}
