@@ -61,6 +61,115 @@ describe("registry", () => {
   });
 });
 
+/**
+ * The unit half of the suite. The per-model block above runs crossCheck against
+ * real manifests, but it can only ever assert the *absence* of issues — and
+ * until #14/#15 land there are no manifests for it to run against at all. That
+ * leaves crossCheck's whole reason for existing (catching a manifest and a
+ * workflow that are each valid alone but broken together — ADR-005) untested.
+ *
+ * These fixtures are the Done criterion for this issue: a deliberately broken
+ * manifest is caught, here, in milliseconds, with no GPU and no real weights.
+ * Each case mutates one thing away from a known-good pair so the assertion
+ * pins the specific failure crossCheck is meant to name, not just "something
+ * went wrong".
+ */
+describe("crossCheck", () => {
+  /** A minimal manifest crossCheck accepts. Only `params` and `output_node`
+   *  are read by crossCheck; the rest is present so the value type-checks as a
+   *  real Manifest rather than a cast, keeping the fixtures honest. */
+  function manifest(over: Partial<Manifest> = {}): Manifest {
+    return {
+      id: "fixture",
+      kind: "image",
+      enabled: true,
+      license: "Apache-2.0",
+      requires: { vram_gb: 13, disk_gb: 14 },
+      files: [
+        {
+          url: "https://huggingface.co/org/model/resolve/main/model.safetensors",
+          dest: "models/checkpoints/model.safetensors",
+          sha256: "a".repeat(64),
+          size: 123,
+        },
+      ],
+      workflow: "workflow.json",
+      params: { prompt: { node: "6", field: "text" } },
+      output_node: "9",
+      tested_on: [{ gpu: "RTX 4090", vram_gb: 24, seconds: 3.5, comfy_sha: "abc1234" }],
+      ...over,
+    };
+  }
+
+  /** An API-format workflow the good manifest resolves cleanly against. */
+  function workflow(over: Workflow = {}): Workflow {
+    return {
+      "6": { class_type: "CLIPTextEncode", inputs: { text: "" } },
+      "9": { class_type: "SaveImage", inputs: { images: [] } },
+      ...over,
+    };
+  }
+
+  it("passes a manifest whose params and output all resolve", () => {
+    expect(crossCheck(manifest(), workflow())).toEqual([]);
+  });
+
+  it("flags a param pointing at a node the workflow does not contain", () => {
+    const issues = crossCheck(
+      manifest({ params: { prompt: { node: "404", field: "text" } } }),
+      workflow(),
+    );
+    expect(issues).toEqual([{ path: "params.prompt.node", message: 'node "404" not in workflow' }]);
+  });
+
+  it("flags a param pointing at a field the node does not have", () => {
+    const issues = crossCheck(
+      manifest({ params: { prompt: { node: "6", field: "nope" } } }),
+      workflow(),
+    );
+    expect(issues).toEqual([
+      { path: "params.prompt.field", message: 'node "6" (CLIPTextEncode) has no input "nope"' },
+    ]);
+  });
+
+  it("flags an output_node absent from the workflow", () => {
+    const issues = crossCheck(manifest({ output_node: "99" }), workflow());
+    expect(issues).toEqual([{ path: "output_node", message: 'node "99" not in workflow' }]);
+  });
+
+  it("flags a manifest with no prompt param — a UI with no prompt box", () => {
+    const issues = crossCheck(
+      manifest({ params: { seed: { node: "6", field: "text" } } }),
+      workflow(),
+    );
+    expect(issues).toEqual([{ path: "params", message: 'must define a "prompt" param' }]);
+  });
+
+  it("flags a UI export (carries `nodes`/`links`) rather than API format", () => {
+    // The standard ComfyUI export; /prompt rejects it. The extra keys are typed
+    // through as workflow nodes, but crossCheck's structural check catches them.
+    const uiExport = workflow({
+      nodes: { class_type: "", inputs: {} },
+      links: { class_type: "", inputs: {} },
+    });
+    const issues = crossCheck(manifest(), uiExport);
+    expect(issues).toContainEqual({
+      path: "workflow",
+      message: "looks like a UI export — re-export with Save (API Format)",
+    });
+  });
+
+  it("reports every problem at once, not just the first", () => {
+    // A contributor fixing a broken manifest should see the whole list in one
+    // run, not peel them off one CI failure at a time.
+    const issues = crossCheck(
+      manifest({ params: { prompt: { node: "404", field: "text" } }, output_node: "99" }),
+      workflow(),
+    );
+    expect(issues.map((i) => i.path)).toEqual(["params.prompt.node", "output_node"]);
+  });
+});
+
 describe.each(models)("registry/$id", ({ id, dir }) => {
   const raw = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
 
