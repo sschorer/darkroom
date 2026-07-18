@@ -49,39 +49,63 @@ export async function generate(
   const client = new ComfyClient(port);
   const workflow = withPrompt(prompt);
 
-  // Our prompt's id, known only after submit. Until then it gates the
-  // completion signal so a stray `executing {node: null}` can't end the run
-  // before it has begun.
+  // Our prompt's id, known only once `submit` resolves. The engine can already
+  // be emitting events by then (they fire during the POST), so events that
+  // arrive before we know our id are *buffered*, not processed or dropped —
+  // otherwise a fast run's completion could land before `submit` returns and be
+  // lost, hanging forever. Once the id is known the buffer is replayed and
+  // subsequent events flow straight through.
   let submittedId: string | null = null;
+  const pending: EngineEvent[] = [];
+
+  // Whether we have seen this prompt actually run. `executing {node: null}` is
+  // the queue going idle, which is completion *only after* our prompt has been
+  // seen executing — otherwise an idle-queue notice that arrives before ours
+  // starts would forge a completion the engine never gave for us.
+  let sawExecuting = false;
 
   const resolvers = deferred();
+  // A socket callback can reject this on a path where we never await it — the
+  // socket failing to open (we throw at `await socket.opened` first), or the
+  // finally's `close` firing `onClose` again after the run already settled. A
+  // benign catch keeps that from surfacing as an unhandled rejection; the
+  // `await resolvers.promise` below still observes the real rejection.
+  void resolvers.promise.catch(() => {});
+
+  const handle = (event: EngineEvent) => {
+    // On a shared engine (the user's own, ADR-007) the socket can carry another
+    // queue item's events; once we know our id, ignore anything not ours.
+    if (event.promptId && submittedId && event.promptId !== submittedId) {
+      return;
+    }
+    switch (event.kind) {
+      case "progress":
+        sawExecuting = true;
+        onProgress({ value: event.value, max: event.max });
+        break;
+      case "executing":
+        if (event.node !== null) {
+          sawExecuting = true;
+        } else if (sawExecuting) {
+          resolvers.resolve();
+        }
+        break;
+      case "error":
+        resolvers.reject(
+          new Error(`${event.error.nodeType || "the engine"}: ${event.error.message}`),
+        );
+        break;
+    }
+  };
 
   // Subscribe before submitting: the opening progress events fire during the
   // POST, and a socket opened after would miss them (ComfyClient.connect).
   const socket = client.connect({
     onEvent(event: EngineEvent) {
-      // On a shared engine (the user's own, ADR-007) the socket can carry
-      // another queue item's events; once we know our id, ignore the rest.
-      if (submittedId && event.promptId && event.promptId !== submittedId) {
-        return;
-      }
-      switch (event.kind) {
-        case "progress":
-          onProgress({ value: event.value, max: event.max });
-          break;
-        case "executing":
-          // `node: null` is the queue going idle — completion for our single
-          // in-flight prompt. Gated on submittedId so it only counts after we
-          // have actually queued something.
-          if (event.node === null && submittedId) {
-            resolvers.resolve();
-          }
-          break;
-        case "error":
-          resolvers.reject(
-            new Error(`${event.error.nodeType || "the engine"}: ${event.error.message}`),
-          );
-          break;
+      if (submittedId === null) {
+        pending.push(event);
+      } else {
+        handle(event);
       }
     },
     onClose() {
@@ -112,6 +136,13 @@ export async function generate(
     }
 
     submittedId = await client.submit(workflow);
+    // Replay whatever arrived while the id was unknown, in order. Synchronous,
+    // so no live event can interleave between assigning the id and draining.
+    for (const event of pending) {
+      handle(event);
+    }
+    pending.length = 0;
+
     await resolvers.promise;
 
     const outputs = await client.history(submittedId);
@@ -137,11 +168,21 @@ function withPrompt(prompt: string): Workflow {
   return workflow;
 }
 
-/** Fetches an engine output and hands back a `blob:` URL the CSP will render. */
+/**
+ * Fetches an engine output and hands back a `blob:` URL the CSP will render.
+ *
+ * A failure here is post-generation (the image exists; serving it faltered), so
+ * there is no `node_errors` to surface — but a bare status is still too little
+ * (§8.6), so the engine's response body is folded in when it sent one. The
+ * engine *log tail*, the other half of the error contract, lives on the Rust
+ * side and is #28's to wire through; a client fetch can't reach it.
+ */
 async function fetchAsBlobUrl(url: string): Promise<string> {
   const res = await fetch(url);
   if (!res.ok) {
-    throw new Error(`could not fetch the generated image: HTTP ${res.status}.`);
+    const body = (await res.text().catch(() => "")).trim();
+    const detail = body ? `: ${body.slice(0, 300)}` : ".";
+    throw new Error(`could not fetch the generated image: HTTP ${res.status}${detail}`);
   }
   return URL.createObjectURL(await res.blob());
 }

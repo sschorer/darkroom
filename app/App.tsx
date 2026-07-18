@@ -84,8 +84,13 @@ export default function App() {
       <Engine view={view} onInstall={() => void install()} />
 
       {/* The gate (#11): once the engine is installed, one prompt, one image.
-          Deliberately spare — #31 is the visual pass, M1 makes models data. */}
-      {view.phase === "idle" && view.status.state === "ready" && <Generate />}
+          Deliberately spare — #31 is the visual pass, M1 makes models data.
+          Gated on CUDA: the Engine note above says non-CUDA generation is
+          unusably slow and unsupported (Q5, TD-2), so offering the button there
+          would contradict it and hand the user a 20-minute render. */}
+      {view.phase === "idle" &&
+        view.status.state === "ready" &&
+        view.status.installed.accelerator === "cuda" && <Generate />}
     </main>
   );
 }

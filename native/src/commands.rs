@@ -86,7 +86,15 @@ pub async fn start_engine<R: Runtime>(
 ) -> Result<u16, String> {
     let mut slot = engine.0.lock().await;
     if let Some(running) = slot.as_ref() {
-        return Ok(running.port);
+        // Only reuse a retained engine that still answers. ComfyUI can exit
+        // after becoming healthy (an OOM, a crash), and the retained handle
+        // does not notice — returning its dead port would fail every retry with
+        // no respawn. A quick probe turns "cached" back into "cached *and
+        // live*"; a dead one is dropped and falls through to a fresh spawn.
+        if sidecar::is_responding(running.port).await {
+            return Ok(running.port);
+        }
+        *slot = None;
     }
 
     let paths = Paths::resolve(&app).map_err(|e| e.to_string())?;

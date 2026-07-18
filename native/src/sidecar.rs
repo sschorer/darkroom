@@ -260,6 +260,25 @@ async fn poll_until_healthy(
     }
 }
 
+/// A single, quick health probe — for checking a *retained* engine is still
+/// answering before its port is reused, not for the long startup wait.
+///
+/// `wait_until_healthy` loops for up to two minutes because it races a process
+/// that is still booting; this asks once, with a short timeout, of a process we
+/// already saw become healthy. Any failure (refused, timed out, non-2xx) means
+/// "not usable now" — the caller should discard the retained engine and respawn
+/// rather than hand back a dead port (ADR-016's leak is reclaimed elsewhere).
+pub async fn is_responding(port: u16) -> bool {
+    let url = format!("http://{LOOPBACK}:{port}{HEALTH_PATH}");
+    let Ok(client) = reqwest::Client::builder().build() else {
+        return false;
+    };
+    matches!(
+        client.get(&url).timeout(Duration::from_secs(2)).send().await,
+        Ok(res) if res.status().is_success()
+    )
+}
+
 /// Which pipe a captured line came from. `stderr` is where ComfyUI prints its
 /// tracebacks, so the frontend can colour it — hence carrying the distinction
 /// on the wire even though the file keeps the lines verbatim.
