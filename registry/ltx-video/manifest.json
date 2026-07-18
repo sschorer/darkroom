@@ -2,7 +2,7 @@
   "id": "ltx-video",
   "kind": "video",
   "enabled": true,
-  "license": "LTX-Video Open Weights License",
+  "license": "LTXV 2B 0.9.5 Open RAIL-M License",
   "requires": {
     "vram_gb": 12,
     "disk_gb": 16
