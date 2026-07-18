@@ -20,8 +20,9 @@
  * asymmetry is in the wire names below and nowhere a caller can reach.
  *
  * What's deliberately not here: workflow construction (ADR-005's `buildWorkflow`,
- * later), cancellation and sequential queueing (#25), and video outputs, which
- * come back under `gifs` rather than `images` (#24). This handles images.
+ * later) and cancellation and sequential queueing (#25). Video outputs, which
+ * come back under `gifs` rather than `images`, are flattened alongside images
+ * (#15) — the ref shape is identical, only the key differs.
  */
 
 /**
@@ -306,13 +307,15 @@ export function parseMessage(data: unknown): EngineEvent | null {
 }
 
 /**
- * Flattens a `/history` response to its image refs. Exported for tests because
+ * Flattens a `/history` response to its output refs. Exported for tests because
  * the response shape (`{ [promptId]: { outputs: { [nodeId]: { images: [...] } } } }`)
  * is deep and undocumented, and the flattening is where a wrong guess hides.
  *
- * Only `images` — video comes back under `gifs` and is #24's problem, called out
- * so the omission reads as scoped, not forgotten. Anything malformed is skipped
- * rather than thrown: a partial history should yield the outputs it does have.
+ * Image nodes report under `images`; video nodes (`SaveAnimatedWEBP`,
+ * `VHS_VideoCombine`) report the identical ref shape under `gifs` (#15). Both
+ * keys are flattened so a clip from the registry path surfaces the same way a
+ * still does. Anything malformed is skipped rather than thrown: a partial
+ * history should yield the outputs it does have.
  */
 export function outputsFromHistory(history: unknown, promptId: string): OutputRef[] {
   const entry = (history as Record<string, unknown> | null)?.[promptId];
@@ -323,23 +326,25 @@ export function outputsFromHistory(history: unknown, promptId: string): OutputRe
 
   const refs: OutputRef[] = [];
   for (const node of Object.values(outputs as Record<string, unknown>)) {
-    const images = (node as { images?: unknown } | null)?.images;
-    if (!Array.isArray(images)) {
-      continue;
-    }
-    for (const image of images) {
-      if (
-        image &&
-        typeof image === "object" &&
-        typeof (image as OutputRef).filename === "string" &&
-        typeof (image as OutputRef).type === "string"
-      ) {
-        const ref = image as { filename: string; subfolder?: unknown; type: string };
-        refs.push({
-          filename: ref.filename,
-          subfolder: typeof ref.subfolder === "string" ? ref.subfolder : "",
-          type: ref.type,
-        });
+    const media = node as { images?: unknown; gifs?: unknown } | null;
+    for (const list of [media?.images, media?.gifs]) {
+      if (!Array.isArray(list)) {
+        continue;
+      }
+      for (const item of list) {
+        if (
+          item &&
+          typeof item === "object" &&
+          typeof (item as OutputRef).filename === "string" &&
+          typeof (item as OutputRef).type === "string"
+        ) {
+          const ref = item as { filename: string; subfolder?: unknown; type: string };
+          refs.push({
+            filename: ref.filename,
+            subfolder: typeof ref.subfolder === "string" ? ref.subfolder : "",
+            type: ref.type,
+          });
+        }
       }
     }
   }
