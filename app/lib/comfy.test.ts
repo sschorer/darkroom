@@ -135,6 +135,36 @@ describe("outputsFromHistory", () => {
       { filename: "a.png", subfolder: "", type: "output" },
     ]);
   });
+
+  it("flattens video refs reported under `gifs`, not just `images`", () => {
+    // Video nodes (SaveAnimatedWEBP, VHS_VideoCombine) report the identical ref
+    // shape under `gifs` — the ltx-video registry path depends on this (#15).
+    const history = {
+      abc: {
+        outputs: {
+          "41": { gifs: [{ filename: "darkroom_00001_.webp", subfolder: "", type: "output" }] },
+        },
+      },
+    };
+    expect(outputsFromHistory(history, "abc")).toEqual([
+      { filename: "darkroom_00001_.webp", subfolder: "", type: "output" },
+    ]);
+  });
+
+  it("collects both `images` and `gifs` when a history carries each", () => {
+    const history = {
+      abc: {
+        outputs: {
+          "9": { images: [{ filename: "still.png", subfolder: "", type: "output" }] },
+          "41": { gifs: [{ filename: "clip.webp", subfolder: "", type: "output" }] },
+        },
+      },
+    };
+    expect(outputsFromHistory(history, "abc")).toEqual([
+      { filename: "still.png", subfolder: "", type: "output" },
+      { filename: "clip.webp", subfolder: "", type: "output" },
+    ]);
+  });
 });
 
 describe("ComfyClient", () => {

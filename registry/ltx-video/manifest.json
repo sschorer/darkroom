@@ -1,0 +1,37 @@
+{
+  "id": "ltx-video",
+  "kind": "video",
+  "enabled": true,
+  "license": "LTXV 2B 0.9.5 Open RAIL-M License",
+  "requires": {
+    "vram_gb": 12,
+    "disk_gb": 16
+  },
+  "files": [
+    {
+      "url": "https://huggingface.co/Lightricks/LTX-Video/resolve/main/ltx-video-2b-v0.9.5.safetensors",
+      "dest": "models/checkpoints/ltx-video-2b-v0.9.5.safetensors",
+      "sha256": "720d15c9f19f7d0f6b2a92bbbc34410e2cfb2f6856a100b38f734fbf973d4adf",
+      "size": 6340729500
+    },
+    {
+      "url": "https://huggingface.co/Comfy-Org/mochi_preview_repackaged/resolve/main/split_files/text_encoders/t5xxl_fp16.safetensors",
+      "dest": "models/text_encoders/t5xxl_fp16.safetensors",
+      "sha256": "6e480b09fae049a72d2a8c5fbccb8d3e92febeb233bbe9dfe7256958a9167635",
+      "size": 9787841024
+    }
+  ],
+  "workflow": "workflow.json",
+  "params": {
+    "prompt": { "node": "6", "field": "text" },
+    "seed": { "node": "71", "field": "noise_seed", "default": 42 },
+    "steps": { "node": "72", "field": "steps", "default": 30, "min": 8, "max": 50 },
+    "width": { "node": "70", "field": "width", "default": 768, "min": 256, "max": 1280 },
+    "height": { "node": "70", "field": "height", "default": 512, "min": 256, "max": 720 },
+    "length": { "node": "70", "field": "length", "default": 97, "min": 9, "max": 257 }
+  },
+  "output_node": "41",
+  "tested_on": [
+    { "gpu": "TODO — awaiting real attestation", "vram_gb": 12, "seconds": 1, "comfy_sha": "0000000" }
+  ]
+}
