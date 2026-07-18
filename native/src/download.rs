@@ -515,44 +515,49 @@ impl PartFile {
     /// keeping them would poison every future resume into re-verifying the same
     /// corruption forever (#18). `dest` is never created on a mismatch — its
     /// presence is the guarantee of a verified file (§8.4).
-    fn finish(mut self, expected_sha: &str) -> Result<(), DownloadError> {
-        self.file.flush().map_err(|source| DownloadError::Io {
-            path: self.part.display().to_string(),
-            source,
-        })?;
-        // Push the bytes to the platter before the rename claims they are whole.
-        self.file.sync_all().map_err(|source| DownloadError::Io {
-            path: self.part.display().to_string(),
-            source,
-        })?;
+    fn finish(self, expected_sha: &str) -> Result<(), DownloadError> {
+        let PartFile {
+            dest,
+            part,
+            mut file,
+            hasher,
+            ..
+        } = self;
+        let io = |path: &Path| {
+            let path = path.display().to_string();
+            move |source| DownloadError::Io { path, source }
+        };
 
-        let actual = format!("{:x}", self.hasher.finalize());
+        file.flush().map_err(io(&part))?;
+        // Push the bytes to the platter before the rename claims they are whole.
+        file.sync_all().map_err(io(&part))?;
+        // Close the handle before touching the path: Windows refuses to remove or
+        // rename a file that still has one open (Unix unlinks it out from under
+        // the handle, but relying on that would leave the `.part` on Windows).
+        drop(file);
+
+        let actual = format!("{:x}", hasher.finalize());
         if actual != expected_sha {
             // Best-effort: the download already failed, and a leftover corrupt
-            // `.part` is a smaller problem than reporting a different error.
-            let _ = std::fs::remove_file(&self.part);
+            // `.part` is a smaller problem than masking the checksum error with a
+            // cleanup one. A complete-but-corrupt `.part` is self-correcting —
+            // the next attempt re-verifies it and removes it again.
+            let _ = std::fs::remove_file(&part);
             return Err(DownloadError::Checksum {
-                dest: self.dest.clone(),
+                dest,
                 expected: expected_sha.to_owned(),
                 actual,
             });
         }
 
-        if let Some(parent) = self.dest.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| DownloadError::Io {
-                path: parent.display().to_string(),
-                source,
-            })?;
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(io(parent))?;
         }
         // The `.part` sits beside `dest`, so this rename stays on one filesystem
-        // and is atomic. Windows refuses to rename onto an existing file, so a
-        // prior copy is cleared first — only ever reached after verification, and
-        // a verified file is byte-identical to whatever it replaces.
-        let _ = std::fs::remove_file(&self.dest);
-        std::fs::rename(&self.part, &self.dest).map_err(|source| DownloadError::Io {
-            path: self.dest.display().to_string(),
-            source,
-        })?;
+        // and is atomic. `std::fs::rename` replaces an existing `dest` in one
+        // step on both Unix and Windows (MOVEFILE_REPLACE_EXISTING), so there is
+        // no pre-remove that would open a window where `dest` is briefly absent.
+        std::fs::rename(&part, &dest).map_err(io(&dest))?;
 
         Ok(())
     }
