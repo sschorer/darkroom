@@ -6,6 +6,7 @@ use tauri::{AppHandle, Manager, RunEvent, Runtime};
 use crate::paths::Paths;
 
 pub mod commands;
+pub mod download;
 pub mod engine;
 pub mod paths;
 pub mod sidecar;
