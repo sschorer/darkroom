@@ -389,7 +389,12 @@ pub async fn fetch(
 /// different weights for one model would fight over a single scratch file. A
 /// suffix on the entire name keeps them distinct (`model.safetensors.part`,
 /// `model.gguf.part`).
-fn part_path(dest: &Path) -> Result<PathBuf, DownloadError> {
+///
+/// `pub` because the download *manager* (#21) needs the same answer this module
+/// uses: to report a "verifying" state it must find a resumed `.part` before
+/// handing off to [`fetch`], and it must find it by the identical rule — the
+/// append, not `with_extension` — or it would look for a file that isn't there.
+pub fn part_path(dest: &Path) -> Result<PathBuf, DownloadError> {
     let name = dest.file_name().ok_or_else(|| DownloadError::BadDest {
         dest: dest.to_owned(),
     })?;

@@ -12,7 +12,10 @@
 
 use tauri::{AppHandle, Runtime, State};
 use tauri_plugin_shell::process::CommandChild;
+use tokio::sync::watch;
 
+use crate::download;
+use crate::downloads::{self, DownloadOutcome, FileSpec, ModelStatus};
 use crate::engine::{self, Installed, Status};
 use crate::paths::Paths;
 use crate::sidecar;
@@ -125,4 +128,87 @@ pub async fn start_engine<R: Runtime>(
 
     *slot = Some(Running { port, child });
     Ok(port)
+}
+
+/// The one download in flight, so a `cancel_download` can reach it.
+///
+/// Holds the *sender* half of the `watch` channel [`downloads::install`] races
+/// against — flipping it to `true` is the cancel. `Some` means a download is
+/// running; `download_model` refuses a second while it is, so the sender is
+/// unambiguous. Serialising downloads (one model at a time) is also the honest
+/// contract for the space precheck (§8.5), which reasons about one batch's
+/// footprint, not several racing for the same disk.
+#[derive(Default)]
+pub struct Downloads(tauri::async_runtime::Mutex<Option<watch::Sender<bool>>>);
+
+/// Installs a model — downloads all its files, verified and resumable — and
+/// resolves to how it ended ([`DownloadOutcome`]).
+///
+/// `files` is the model's manifest `files`, passed from the frontend where the
+/// registry lives (the registry is bundled TS data, ADR-005; Rust does not parse
+/// manifests). Progress arrives out-of-band on [`downloads::EVENT`] — subscribe
+/// before invoking, exactly as the bootstrap does, because the events fire
+/// throughout a command that resolves only at the very end.
+///
+/// One at a time: a second call while a download runs is refused rather than
+/// queued, so the caller learns immediately instead of after ten minutes. A
+/// checksum mismatch, a full disk, or a moved file rejects with the actionable
+/// message `download`'s errors already carry (§8.6); a user cancel is
+/// `Ok(Cancelled)`, not an error, with the partial left to resume.
+#[tauri::command]
+pub async fn download_model<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, Downloads>,
+    files: Vec<FileSpec>,
+) -> Result<DownloadOutcome, String> {
+    // Fail the cheap, non-guarded prerequisites before claiming the slot, so an
+    // early error never strands a stored sender that would wedge the next call.
+    let paths = Paths::resolve(&app).map_err(|e| e.to_string())?;
+    let client = download::client().map_err(|e| format!("could not start the downloader: {e}"))?;
+
+    let (tx, rx) = watch::channel(false);
+    {
+        let mut slot = state.0.lock().await;
+        if slot.is_some() {
+            return Err(
+                "A download is already running. Wait for it to finish or cancel it.".into(),
+            );
+        }
+        *slot = Some(tx);
+    }
+
+    let models = paths.models();
+    let emitter = app.clone();
+    let result = downloads::install(&client, &models, &files, rx, move |p| {
+        downloads::emit(&emitter, p)
+    })
+    .await;
+
+    // Clear the slot whatever happened — completion, cancel, or error — so the
+    // next install can start and a stale sender never lingers.
+    *state.0.lock().await = None;
+    result
+}
+
+/// Cancels the running download, if any. Idempotent and harmless when nothing is
+/// running — a stray cancel is not an error. Flips the `watch` flag; the install
+/// loop drops its in-flight fetch, leaving the `.part` to resume.
+#[tauri::command]
+pub async fn cancel_download(state: State<'_, Downloads>) -> Result<(), String> {
+    if let Some(tx) = state.0.lock().await.as_ref() {
+        let _ = tx.send(true);
+    }
+    Ok(())
+}
+
+/// Reports a model's install state — installed, partway (resumable), or not
+/// started — from the filesystem alone (§8.4). Lets the manager show the right
+/// affordance on mount and refresh it after a download settles.
+#[tauri::command]
+pub async fn model_status<R: Runtime>(
+    app: AppHandle<R>,
+    files: Vec<FileSpec>,
+) -> Result<ModelStatus, String> {
+    let paths = Paths::resolve(&app).map_err(|e| e.to_string())?;
+    downloads::status(&paths.models(), &files)
 }
