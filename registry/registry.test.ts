@@ -146,12 +146,19 @@ describe("crossCheck", () => {
   });
 
   it("flags a UI export (carries `nodes`/`links`) rather than API format", () => {
-    // The standard ComfyUI export; /prompt rejects it. The extra keys are typed
-    // through as workflow nodes, but crossCheck's structural check catches them.
-    const uiExport = workflow({
-      nodes: { class_type: "", inputs: {} },
-      links: { class_type: "", inputs: {} },
-    });
+    // The standard ComfyUI export; /prompt rejects it. Its top-level shape is
+    // nothing like the API format — `nodes`/`links` are arrays of layout, not a
+    // node map — so it is not a valid Workflow, hence the boundary cast. That is
+    // exactly the file crossCheck's presence check exists to catch when one
+    // slips past the schema. (A recorded export would be truer still, but needs
+    // a running ComfyUI, which CI has no way to provide — ADR-010.)
+    const uiExport = {
+      last_node_id: 10,
+      last_link_id: 9,
+      nodes: [{ id: 6, type: "CLIPTextEncode" }],
+      links: [[1, 6, 0, 9, 0, "CONDITIONING"]],
+      version: 0.4,
+    } as unknown as Workflow;
     const issues = crossCheck(manifest(), uiExport);
     expect(issues).toContainEqual({
       path: "workflow",
