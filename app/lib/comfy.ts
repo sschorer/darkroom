@@ -222,6 +222,55 @@ export class ComfyClient {
     });
     return `${this.httpBase}/view?${query}`;
   }
+
+  /**
+   * Reads the engine's `/system_stats` and returns the total VRAM in bytes of
+   * the largest GPU it sees, or `null` when it sees none. This is the number
+   * VRAM gating compares each model's `requires.vram_gb` against (§8.5, Q5,
+   * `gate.ts`).
+   *
+   * ADR-008 puts this read in the frontend: the sidecar hits the same endpoint
+   * at boot, but only as proof of life — the VRAM figure it carries is ours to
+   * re-read here (sidecar.rs, §6.2). `null` is not an error — a CPU-only engine
+   * has no VRAM to gate on, and the UI's accelerator warning already tells that
+   * user their setup is unsupported (TD-2).
+   */
+  async systemStats(): Promise<number | null> {
+    const res = await fetch(`${this.httpBase}/system_stats`);
+    if (!res.ok) {
+      throw new Error(`could not read system stats from the engine: HTTP ${res.status}`);
+    }
+    return vramTotalFromStats(await res.json());
+  }
+}
+
+/**
+ * The total VRAM in bytes of the largest GPU the engine reports, or `null` when
+ * it reports none. Exported for its own tests: `/system_stats`' shape is
+ * ComfyUI's own and undocumented, and the device selection is where a wrong
+ * guess would silently gate every model or none.
+ *
+ * A `cpu` device is skipped — ComfyUI reports the machine's *system RAM* as its
+ * `vram_total`, which would wave every model through on a GPU-less box, the
+ * exact OOM VRAM gating exists to prevent (§8.5). Across the remaining GPUs the
+ * largest wins: that is the one generation will land on.
+ */
+export function vramTotalFromStats(raw: unknown): number | null {
+  const devices = (raw as { devices?: unknown } | null)?.devices;
+  if (!Array.isArray(devices)) {
+    return null;
+  }
+  let best: number | null = null;
+  for (const device of devices) {
+    const d = device as { type?: unknown; vram_total?: unknown } | null;
+    if (!d || d.type === "cpu") {
+      continue;
+    }
+    if (typeof d.vram_total === "number" && d.vram_total > 0) {
+      best = best === null ? d.vram_total : Math.max(best, d.vram_total);
+    }
+  }
+  return best;
 }
 
 /**

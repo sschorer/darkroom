@@ -7,11 +7,12 @@
  * a manifest CI accepts is a manifest the app can read, and neither can drift
  * from the other.
  *
- * VRAM gating and workflow resolution are deliberately *not* here yet — gating
- * is #20 (it needs real `/system_stats`, ADR-004/Q5), and locating each model's
- * `workflow.json` is `buildWorkflow`'s job (#16). This module does the one thing
- * #12 asks for: turn the bundled manifests into validated {@link Manifest}
- * values the rest of the app can build on.
+ * VRAM gating and workflow resolution are deliberately *not* here — gating lives
+ * in `gate.ts` (#20), which compares this registry's models against the engine's
+ * real `/system_stats` VRAM (§8.5, Q5), and locating each model's `workflow.json`
+ * is `buildWorkflow`'s job (#16). This module does the one thing #12 asks for:
+ * turn the bundled manifests into validated {@link Manifest} values the rest of
+ * the app can build on.
  */
 import { Manifest } from "./registry.schema";
 
