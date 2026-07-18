@@ -5,7 +5,7 @@
   "license": "Apache-2.0",
   "requires": {
     "vram_gb": 16,
-    "disk_gb": 16
+    "disk_gb": 18
   },
   "files": [
     {
