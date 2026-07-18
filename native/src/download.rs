@@ -808,4 +808,273 @@ mod tests {
             "must stay capped"
         );
     }
+
+    // ---------------------------------------------------------------------
+    // #18 (QS-7): the nasty cases, driven end-to-end through `fetch` against a
+    // local server. The seams above prove each mechanism in isolation; these
+    // prove `fetch` wires them together — that a real 200-to-a-Range resets, a
+    // real bad digest cleans up, and a real cancel resumes. The server is a raw
+    // `TcpListener` in a thread, mirroring sidecar.rs: no new dependency, and
+    // full control over the 200-vs-206 and mid-stream-stall behaviour these
+    // traps need (and which `reqwest::get` against a mock could not give).
+    // ---------------------------------------------------------------------
+
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+    use std::sync::Arc;
+
+    /// Spawns a throwaway HTTP/1.1 server and returns a URL pointing at it.
+    ///
+    /// Each accepted connection is handed to `handle` on *its own* thread —
+    /// together with its 0-based index and the offset of any `Range:` header —
+    /// so one connection can stall (the cancel case) while a later one is served
+    /// normally (the resume). The listener runs until the process exits, exactly
+    /// as the `serve_*` helpers in sidecar.rs do.
+    fn spawn_http<H>(handle: H) -> String
+    where
+        H: Fn(usize, Option<u64>, &mut TcpStream) + Send + Sync + 'static,
+    {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind loopback");
+        let port = listener.local_addr().expect("addr").port();
+        let handle = Arc::new(handle);
+
+        std::thread::spawn(move || {
+            for (i, stream) in listener.incoming().enumerate() {
+                let Ok(mut stream) = stream else { break };
+                let handle = Arc::clone(&handle);
+                std::thread::spawn(move || {
+                    let offset = read_range_offset(&mut stream);
+                    handle(i, offset, &mut stream);
+                });
+            }
+        });
+
+        format!("http://{}:{}/model.bin", Ipv4Addr::LOCALHOST, port)
+    }
+
+    /// Reads the request headers and returns the start offset of any `Range:
+    /// bytes=<n>-` header. Byte-at-a-time is fine — request headers are tiny —
+    /// and case-insensitive because reqwest emits the header name lowercased.
+    fn read_range_offset(stream: &mut TcpStream) -> Option<u64> {
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        while stream.read(&mut byte).ok()? == 1 {
+            buf.push(byte[0]);
+            if buf.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        let text = String::from_utf8_lossy(&buf);
+        for line in text.lines() {
+            if let Some(rest) = line.to_ascii_lowercase().strip_prefix("range: bytes=") {
+                return rest.split('-').next()?.trim().parse().ok();
+            }
+        }
+        None
+    }
+
+    /// Answers `200 OK` with the whole `payload`, ignoring any `Range` — a CDN
+    /// that does not honour resumes.
+    fn send_full(stream: &mut TcpStream, payload: &[u8]) {
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+            payload.len()
+        );
+        let _ = stream.write_all(head.as_bytes());
+        let _ = stream.write_all(payload);
+    }
+
+    /// Answers a `Range` request honestly: `206` with the tail from `offset`, or
+    /// `416` once the offset is at/past the end (a resume of a complete file).
+    fn send_range(stream: &mut TcpStream, payload: &[u8], offset: u64) {
+        let offset = offset as usize;
+        if offset >= payload.len() {
+            let _ = stream
+                .write_all(b"HTTP/1.1 416 Range Not Satisfiable\r\nConnection: close\r\n\r\n");
+            return;
+        }
+        let body = &payload[offset..];
+        let head = format!(
+            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n",
+            body.len(),
+            offset,
+            payload.len() - 1,
+            payload.len()
+        );
+        let _ = stream.write_all(head.as_bytes());
+        let _ = stream.write_all(body);
+    }
+
+    /// A CDN that ignores `Range` and re-sends from byte 0. A `.part` left by a
+    /// prior attempt holds bytes that are *not* a prefix of the real file, so a
+    /// missing reset would fold them into the digest and fail the hash an hour
+    /// later; `fetch` must discard them and verify against the fresh body alone.
+    #[test]
+    fn fetch_resets_when_the_server_ignores_range_and_still_verifies() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dest = tmp.path().join("model.bin");
+        let part = part_path(&dest).expect("part path");
+
+        let payload = vec![0xABu8; 64 * 1024];
+        // The poison a missing reset would append to.
+        std::fs::write(&part, b"stale bytes from an interrupted attempt").expect("seed .part");
+
+        let served = payload.clone();
+        let url = spawn_http(move |_conn, _offset, stream| send_full(stream, &served));
+
+        let client = client().expect("client");
+        let mut last = None;
+        let result = tauri::async_runtime::block_on(fetch(
+            &client,
+            &url,
+            &dest,
+            &sha256_hex(&payload),
+            payload.len() as u64,
+            |p| last = Some(p),
+        ));
+
+        result.expect("an ignored-range resume must reset and verify");
+        assert_eq!(std::fs::read(&dest).expect("dest"), payload);
+        assert!(
+            !part.exists(),
+            "the .part is gone after the verified rename"
+        );
+        assert_eq!(
+            last,
+            Some(Progress {
+                received: payload.len() as u64,
+                total: payload.len() as u64,
+            }),
+            "the bar lands exactly on the true total"
+        );
+    }
+
+    /// A completed download whose bytes do not match the manifest digest: the
+    /// `.part` is removed and `dest` is never created, so its presence stays the
+    /// guarantee of a verified file (§8.4).
+    #[test]
+    fn fetch_discards_the_part_on_a_checksum_mismatch() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dest = tmp.path().join("model.bin");
+        let part = part_path(&dest).expect("part path");
+
+        let payload = vec![0x11u8; 4096];
+        let served = payload.clone();
+        let url = spawn_http(move |_conn, offset, stream| match offset {
+            Some(o) => send_range(stream, &served, o),
+            None => send_full(stream, &served),
+        });
+
+        let client = client().expect("client");
+        let err = tauri::async_runtime::block_on(fetch(
+            &client,
+            &url,
+            &dest,
+            &sha256_hex(b"a completely different file"),
+            payload.len() as u64,
+            |_p| {},
+        ))
+        .expect_err("a checksum mismatch must fail");
+
+        assert!(matches!(err, DownloadError::Checksum { .. }));
+        assert!(
+            !part.exists(),
+            "a corrupt .part must not survive a mismatch"
+        );
+        assert!(
+            !dest.exists(),
+            "dest must never appear for an unverified file"
+        );
+    }
+
+    /// A cancel mid-stream (the future is dropped) leaves the `.part` on disk,
+    /// and the next call resumes it to completion. The server hands connection 0
+    /// a real prefix then holds the socket so the caller cancels; connection 1
+    /// honours the `Range` and sends the rest.
+    #[test]
+    fn a_cancelled_fetch_leaves_a_part_that_the_next_run_resumes() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dest = tmp.path().join("model.bin");
+        let part = part_path(&dest).expect("part path");
+
+        let payload = vec![0x55u8; 32 * 1024];
+        let prefix = 8 * 1024usize;
+        let served = payload.clone();
+        let url = spawn_http(move |conn, offset, stream| {
+            if conn == 0 {
+                // First run: a real prefix, then hold the connection open — long
+                // enough that the caller does the cancelling, not an early EOF.
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                    served.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&served[..prefix]);
+                let _ = stream.flush();
+                std::thread::sleep(Duration::from_secs(10));
+            } else {
+                // Resume: honour the Range and deliver the tail.
+                match offset {
+                    Some(o) => send_range(stream, &served, o),
+                    None => send_full(stream, &served),
+                }
+            }
+        });
+
+        let client = client().expect("client");
+
+        // Run the fetch as an abortable task and cancel it the moment the prefix
+        // has landed — not on a fixed wall-clock guess, which a slow runner could
+        // outlast (or beat) and make the test flake either way.
+        let task = {
+            let client = client.clone();
+            let url = url.clone();
+            let dest = dest.clone();
+            let sha = sha256_hex(&payload);
+            let total = payload.len() as u64;
+            tauri::async_runtime::spawn(async move {
+                fetch(&client, &url, &dest, &sha, total, |_p| {}).await
+            })
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0) < prefix as u64 {
+            assert!(Instant::now() < deadline, "the prefix never arrived");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        task.abort();
+        // Await the aborted task so its file handle is dropped before we look.
+        let cancelled = tauri::async_runtime::block_on(task);
+        assert!(
+            cancelled.is_err(),
+            "the fetch must be cancelled, not finish"
+        );
+
+        assert!(
+            part.exists(),
+            "a cancel must leave the .part to resume from"
+        );
+        assert_eq!(
+            std::fs::metadata(&part).expect("part meta").len(),
+            prefix as u64,
+            "the bytes that arrived before the cancel are kept, and no more"
+        );
+        assert!(!dest.exists(), "no dest until the download is verified");
+
+        // The next run resumes from the prefix and completes.
+        tauri::async_runtime::block_on(fetch(
+            &client,
+            &url,
+            &dest,
+            &sha256_hex(&payload),
+            payload.len() as u64,
+            |_p| {},
+        ))
+        .expect("the resume must complete and verify");
+
+        assert_eq!(std::fs::read(&dest).expect("dest"), payload);
+        assert!(
+            !part.exists(),
+            "the .part is gone after the verified rename"
+        );
+    }
 }
