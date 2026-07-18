@@ -5,9 +5,10 @@ to match that mockup exactly — same layout, colours, type, spacing, copy, and
 states. Acceptance criteria say "matches the mockup" and mean it: compare
 against the file at a **1440 × 920** window.
 
-Plan numbers in `docs/BACKLOG.md` are #23–#31; live GH issues for M2 start at
-**GH #25**. **File #0 first** (it rewrites the backlog); then #1 (foundations)
-before any screen work, since everything references its tokens.
+Plan numbers in `docs/BACKLOG.md` are #23–#33; live GH issues for M2 are
+**GH #52–#62** (plan #23–#33 in order). **File #0 first** (it rewrites the
+backlog); then #1 (foundations) before any screen work, since everything
+references its tokens.
 
 ---
 
@@ -17,11 +18,12 @@ before any screen work, since everything references its tokens.
 The M2 UI is designed (Studio direction). Update `docs/BACKLOG.md` so scope and
 numbers match before seeding the work:
 
-- **#27 model picker** → the *selection* control lives **in the compose bar**;
-  full install/remove/gating management moves to the new **Settings** page.
-- **#28 error surfacing** → specify a **node-error banner** above the compose
+- **Model picker** (was plan #27) → the *selection* control lives **in the
+  compose bar** (#25); full install/remove/gating management moves to the new
+  **Settings** page (#30).
+- **#29 error surfacing** → specify a **node-error banner** above the compose
   bar + a **failed tile** in the gallery (details in issue #7).
-- **#24 queue** → add the **live-generating tile** (in-grid, step bar + cancel)
+- **#27 queue** → add the **live-generating tile** (in-grid, step bar + cancel)
   as an explicit deliverable.
 - **NEW: Settings / model-manager page** (issue #8) — not currently in the
   backlog; reached from a **bottom-left Settings button**.
@@ -239,7 +241,7 @@ skippable.
 ## 11 · design: visual pass sign-off
 **Labels:** `design`, `M2` · **Size:** M · **needs:** #9
 
-#31 — final QA that the built app matches `Darkroom Studio.dc.html` across all
+#33 — final QA that the built app matches `Darkroom Studio.dc.html` across all
 screens: tokens applied, safelight-dot status, red focus states, tonal
 placeholder tiles for loading/empty, consistent density. No default framework
 styling remains.
