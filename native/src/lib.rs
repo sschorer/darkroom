@@ -98,6 +98,7 @@ pub fn run() {
         .menu(build_menu)
         .on_menu_event(handle_menu_event)
         .manage(commands::Bootstrapping::default())
+        .manage(commands::RunningEngine::default())
         .setup(|app| {
             // Before this session can spawn its own engine, clear one a
             // hard-killed previous run left holding the GPU (§8.3).
@@ -106,7 +107,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::engine_status,
-            commands::bootstrap_engine
+            commands::bootstrap_engine,
+            commands::start_engine
         ])
         .build(tauri::generate_context!());
 

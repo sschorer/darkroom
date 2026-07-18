@@ -496,7 +496,7 @@ After bootstrap and one model, the app is fully functional with the network off.
 **Status:** accepted
 **Decision:** Rust owns the process; the frontend owns the HTTP/WS conversation.
 **Rationale:** Proxying through Rust adds a hop and re-implements a protocol the WebView already speaks natively. Progress events are high-frequency; the IPC bridge is the wrong place for them.
-**Consequences:** Engine URL construction lives in the frontend; CSP becomes load-bearing.
+**Consequences:** Engine URL construction lives in the frontend; CSP becomes load-bearing. The WebView is a *different* origin from the engine, so the engine must be spawned with `--enable-cors-header` — ComfyUI's default `origin_only_middleware` 403s cross-origin requests, which is everything the frontend sends (found in #11; the Rust health probe passes anyway because it sends no `Origin`, so the engine reads healthy while refusing the frontend). Dropping that origin gate is safe only because the engine is loopback-bound on a random port (ADR-007). Output pixels also can't go straight into an `<img>`: the engine's `/view` URL is cross-origin and `img-src` doesn't list it (only `connect-src` does), so the frontend fetches the bytes and renders a `blob:` URL.
 
 ### ADR-009 — Vouch-based contributor trust, labelling only
 

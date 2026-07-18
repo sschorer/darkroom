@@ -260,6 +260,25 @@ async fn poll_until_healthy(
     }
 }
 
+/// A single, quick health probe — for checking a *retained* engine is still
+/// answering before its port is reused, not for the long startup wait.
+///
+/// `wait_until_healthy` loops for up to two minutes because it races a process
+/// that is still booting; this asks once, with a short timeout, of a process we
+/// already saw become healthy. Any failure (refused, timed out, non-2xx) means
+/// "not usable now" — the caller should discard the retained engine and respawn
+/// rather than hand back a dead port (ADR-016's leak is reclaimed elsewhere).
+pub async fn is_responding(port: u16) -> bool {
+    let url = format!("http://{LOOPBACK}:{port}{HEALTH_PATH}");
+    let Ok(client) = reqwest::Client::builder().build() else {
+        return false;
+    };
+    matches!(
+        client.get(&url).timeout(Duration::from_secs(2)).send().await,
+        Ok(res) if res.status().is_success()
+    )
+}
+
 /// Which pipe a captured line came from. `stderr` is where ComfyUI prints its
 /// tracebacks, so the frontend can colour it — hence carrying the distinction
 /// on the wire even though the file keeps the lines verbatim.
@@ -468,6 +487,19 @@ impl RotatingLog {
 ///
 /// `--disable-auto-launch` keeps ComfyUI from opening the system browser at its
 /// own URL; the WebView is the only frontend.
+///
+/// `--enable-cors-header` is load-bearing and invisible from our code. By
+/// default ComfyUI installs an `origin_only_middleware` that 403s any request
+/// carrying `Sec-Fetch-Site: cross-site` or an `Origin` whose host differs from
+/// the request's (its anti-DNS-rebinding guard, `server.py`). The WebView is a
+/// *different* origin from the engine — `tauri://localhost` (or the dev server)
+/// talking to `127.0.0.1:<port>` — so every `fetch`/WebSocket it makes is
+/// cross-site and gets 403'd, while our Rust health probe (`reqwest`, no such
+/// headers) sails through: the engine looks healthy yet refuses the frontend.
+/// Passing this flag swaps that middleware for a permissive CORS one, which is
+/// what makes ADR-008 (frontend talks to the engine directly) actually work.
+/// Safe here because the engine is loopback-only on a random port (ADR-007);
+/// the origin gate was defending a *fixed* public port we don't expose.
 fn engine_args(comfy_main: &Path, port: u16) -> Vec<String> {
     vec![
         comfy_main.display().to_string(),
@@ -476,6 +508,7 @@ fn engine_args(comfy_main: &Path, port: u16) -> Vec<String> {
         "--port".into(),
         port.to_string(),
         "--disable-auto-launch".into(),
+        "--enable-cors-header".into(),
     ]
 }
 
@@ -689,6 +722,20 @@ mod tests {
     fn the_browser_auto_launch_is_disabled() {
         let args = engine_args(Path::new("/engine/ComfyUI/main.py"), 49876);
         assert!(args.iter().any(|a| a == "--disable-auto-launch"));
+    }
+
+    /// Without this the WebView — a different origin from the engine — is 403'd
+    /// on every request by ComfyUI's default origin guard, while our reqwest
+    /// health probe (which sends no `Origin`/`Sec-Fetch-Site`) still passes: the
+    /// engine reports healthy yet refuses the frontend. It is the flag that
+    /// makes ADR-008 real, so it is a tested contract, not an incidental arg.
+    #[test]
+    fn the_cross_origin_gate_is_disabled_for_the_webview() {
+        let args = engine_args(Path::new("/engine/ComfyUI/main.py"), 49876);
+        assert!(
+            args.iter().any(|a| a == "--enable-cors-header"),
+            "the WebView is cross-origin to the engine and is 403'd without this"
+        );
     }
 
     #[test]

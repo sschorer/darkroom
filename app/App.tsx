@@ -18,6 +18,7 @@ import {
   type EngineStatus,
 } from "./lib/engine";
 import { formatBytes } from "./lib/format";
+import { generate, type GenerateProgress } from "./lib/generate";
 
 type View =
   | { phase: "checking" }
@@ -81,7 +82,105 @@ export default function App() {
       <p className="text-sm text-neutral-400">Generate images and video on your own GPU.</p>
 
       <Engine view={view} onInstall={() => void install()} />
+
+      {/* The gate (#11): once the engine is installed, one prompt, one image.
+          Deliberately spare — #31 is the visual pass, M1 makes models data.
+          Gated on CUDA: the Engine note above says non-CUDA generation is
+          unusably slow and unsupported (Q5, TD-2), so offering the button there
+          would contradict it and hand the user a 20-minute render. */}
+      {view.phase === "idle" &&
+        view.status.state === "ready" &&
+        view.status.installed.accelerator === "cuda" && <Generate />}
     </main>
+  );
+}
+
+/**
+ * The walking-skeleton generator: a prompt, a button, an image (#11). No model
+ * choice, no history, no cancel — those are later. It exists to prove the
+ * engine→client→pixels path end to end on the developer's own GPU, which is the
+ * milestone gate this whole M0 leads to.
+ */
+type GenState =
+  | { phase: "idle" }
+  // `progress` is null from the click until the first sampling event — a window
+  // that includes a cold engine start (up to 120s), so the label must not imply
+  // sampling has begun.
+  | { phase: "generating"; progress: GenerateProgress | null }
+  | { phase: "done"; imageUrl: string }
+  | { phase: "failed"; error: string };
+
+function Generate() {
+  const [prompt, setPrompt] = useState("a photo of a cat wearing a tiny hat, studio lighting");
+  const [state, setState] = useState<GenState>({ phase: "idle" });
+
+  // The image is a blob: URL the browser holds until revoked; leaving old ones
+  // unrevoked leaks memory across generations. Revoke on replacement and unmount.
+  const imageUrl = state.phase === "done" ? state.imageUrl : null;
+  useEffect(() => {
+    return () => {
+      if (imageUrl) URL.revokeObjectURL(imageUrl);
+    };
+  }, [imageUrl]);
+
+  const run = useCallback(() => {
+    setState({ phase: "generating", progress: null });
+    void (async () => {
+      try {
+        const url = await generate(prompt, (p) =>
+          // Ignore progress that arrives after we've left the generating phase.
+          setState((s) => (s.phase === "generating" ? { phase: "generating", progress: p } : s)),
+        );
+        setState({ phase: "done", imageUrl: url });
+      } catch (e) {
+        setState({ phase: "failed", error: String(e) });
+      }
+    })();
+  }, [prompt]);
+
+  const busy = state.phase === "generating";
+
+  return (
+    <section className="mt-6 flex w-full max-w-md flex-col items-center gap-3">
+      <textarea
+        value={prompt}
+        onChange={(e) => setPrompt(e.target.value)}
+        disabled={busy}
+        rows={3}
+        className="w-full resize-none rounded bg-neutral-900 p-3 text-sm text-neutral-100 disabled:opacity-50"
+      />
+      <Button onClick={run} disabled={busy || prompt.trim() === ""}>
+        {busy ? "Generating…" : "Generate"}
+      </Button>
+
+      {state.phase === "generating" && <GenProgress progress={state.progress} />}
+
+      {state.phase === "failed" && (
+        <pre className="max-h-60 w-full overflow-auto whitespace-pre-wrap rounded bg-neutral-900 p-3 text-left text-xs text-red-300">
+          {state.error}
+        </pre>
+      )}
+
+      {state.phase === "done" && (
+        <img src={state.imageUrl} alt={prompt} className="w-full rounded" />
+      )}
+    </section>
+  );
+}
+
+/** Sampling progress: a byte-less bar once the engine reports steps, a plain
+ * line before that (which spans the cold engine start). */
+function GenProgress({ progress }: { progress: GenerateProgress | null }) {
+  if (!progress) {
+    return <Note>Starting the engine and queuing the prompt…</Note>;
+  }
+  return (
+    <div className="flex w-full flex-col items-center gap-1">
+      <Bar received={progress.value} total={progress.max} />
+      <p className="text-xs tabular-nums text-neutral-500">
+        step {progress.value} of {progress.max}
+      </p>
+    </div>
   );
 }
 
@@ -218,11 +317,20 @@ function Note({ children, tone }: { children: React.ReactNode; tone?: "warn" }) 
   );
 }
 
-function Button({ children, onClick }: { children: React.ReactNode; onClick: () => void }) {
+function Button({
+  children,
+  onClick,
+  disabled,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
   return (
     <button
       onClick={onClick}
-      className="rounded bg-neutral-100 px-4 py-2 text-sm font-medium text-neutral-900 hover:bg-white"
+      disabled={disabled}
+      className="rounded bg-neutral-100 px-4 py-2 text-sm font-medium text-neutral-900 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-neutral-100"
     >
       {children}
     </button>
