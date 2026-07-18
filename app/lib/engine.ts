@@ -39,6 +39,18 @@ export const engineStatus = () => invoke<EngineStatus>("engine_status");
 export const bootstrapEngine = () => invoke<Installed>("bootstrap_engine");
 
 /**
+ * Starts ComfyUI and resolves to the loopback port it answers on (§6.2). Build
+ * a {@link import("./comfy").ComfyClient} from that port to talk to it.
+ *
+ * Idempotent on the Rust side: calling it while an engine is already up returns
+ * the same port rather than spawning a second one, so a "Generate" button can
+ * call it unconditionally. Resolves only once the engine really answers
+ * `/system_stats` (up to 120s on a cold start), or rejects with the actionable
+ * message the sidecar built — which points at the engine log on a failed boot.
+ */
+export const startEngine = () => invoke<number>("start_engine");
+
+/**
  * A bootstrap progress update, mirroring `engine::progress::Progress`. Tagged
  * by `phase` so it reads as a discriminated union — narrow on `phase`.
  */

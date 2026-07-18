@@ -11,9 +11,11 @@
 //! error surfacing gets designed, and it can revisit this.
 
 use tauri::{AppHandle, Runtime, State};
+use tauri_plugin_shell::process::CommandChild;
 
 use crate::engine::{self, Installed, Status};
 use crate::paths::Paths;
+use crate::sidecar;
 
 /// Serialises bootstraps.
 ///
@@ -44,4 +46,65 @@ pub async fn bootstrap_engine<R: Runtime>(
     engine::provision(&app, &paths)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// The engine this session spawned, once it is up.
+///
+/// Holds the [`CommandChild`] for the one reason `sidecar::Engine` documents:
+/// keeping it alive keeps the plugin's pipes open so the log pump keeps
+/// draining. Teardown does *not* go through this handle — `reclaim_stale` kills
+/// by the PID file `spawn` wrote, at `ExitRequested` and at the next boot — so
+/// dropping it never strands the process (§8.3, ADR-016). The port is kept so a
+/// second `start_engine` is idempotent rather than spawning a rival engine.
+#[derive(Default)]
+pub struct RunningEngine(tauri::async_runtime::Mutex<Option<Running>>);
+
+struct Running {
+    port: u16,
+    #[allow(dead_code)] // held only so the pipes stay open; never read.
+    child: CommandChild,
+}
+
+/// Starts ComfyUI and returns the loopback port it answers on (§6.2, ADR-007).
+///
+/// Idempotent: called again while an engine is already up, it returns that
+/// engine's port rather than spawning a second one. The lock is held across the
+/// health wait so two racing calls can't both spawn — the second blocks, then
+/// sees the first's engine and returns its port.
+///
+/// The order is load-bearing. The log pump is spawned *before* the health wait,
+/// because ComfyUI's boot output — including the traceback of a failed node
+/// import — arrives during that wait, and an undrained pipe would back-pressure
+/// the engine into a hang (`sidecar::pump`). If the engine never answers, the
+/// just-spawned child is killed here rather than left holding the GPU until
+/// teardown; the port and error come from `sidecar`, whose `Display` already
+/// points at the engine log (§8.6).
+#[tauri::command]
+pub async fn start_engine<R: Runtime>(
+    app: AppHandle<R>,
+    engine: State<'_, RunningEngine>,
+) -> Result<u16, String> {
+    let mut slot = engine.0.lock().await;
+    if let Some(running) = slot.as_ref() {
+        return Ok(running.port);
+    }
+
+    let paths = Paths::resolve(&app).map_err(|e| e.to_string())?;
+    let sidecar::Engine {
+        port,
+        child,
+        events,
+    } = sidecar::spawn(&app, &paths).map_err(|e| e.to_string())?;
+
+    // Drain the pipe from the moment the process exists — before the health
+    // wait, not after (see the fn doc).
+    tauri::async_runtime::spawn(sidecar::pump(app.clone(), events, paths.engine_log()));
+
+    if let Err(e) = sidecar::wait_until_healthy(port).await {
+        let _ = child.kill();
+        return Err(e.to_string());
+    }
+
+    *slot = Some(Running { port, child });
+    Ok(port)
 }
