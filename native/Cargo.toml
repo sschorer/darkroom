@@ -76,6 +76,12 @@ sysinfo = { version = "0.36", default-features = false, features = ["system"] }
 
 thiserror = "2"
 
+# The free-space precheck before a weight download (download.rs, §8.6). Reads
+# the available bytes on the filesystem holding the models dir via one statvfs;
+# the `sync` default feature is all of it, and no async/tokio integration is
+# wanted since the call is a single non-blocking syscall.
+fs4 = { version = "1", default-features = false, features = ["sync"] }
+
 # Generates the TypeScript mirrors of the IPC types (ADR-018) into
 # app/lib/generated/, so the wire contract has one definition instead of a
 # hand-kept copy that drifts silently across the FFI boundary. Optional and

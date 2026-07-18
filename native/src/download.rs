@@ -85,6 +85,22 @@ pub enum DownloadError {
     },
 
     #[error(
+        "not enough free space to download.\n  \
+         About {need:.1} GiB is needed but only {avail:.1} GiB is free on the \
+         disk holding {dir}. Free up space (or point Darkroom at a roomier disk) \
+         and try again.",
+        need = gib(*needed),
+        avail = gib(*available),
+    )]
+    InsufficientSpace {
+        dir: PathBuf,
+        /// The padded requirement — `sum(size) * 1.1`, not the raw sum — so the
+        /// message names the number actually demanded.
+        needed: u64,
+        available: u64,
+    },
+
+    #[error(
         "could not fetch {url}: {source}\n  \
          The download can be resumed — nothing already downloaded was lost. \
          Check the connection and try again."
@@ -176,6 +192,85 @@ pub fn client() -> reqwest::Result<reqwest::Client> {
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(READ_TIMEOUT)
         .build()
+}
+
+/// Headroom over the declared total to demand free before a batch starts.
+///
+/// Weights stream into a `.part` that is renamed onto its destination in place
+/// (see [`fetch`]), so the peak on-disk footprint of a batch is essentially the
+/// sum of the files' declared sizes — not twice it. The extra tenth is slack for
+/// the filesystem's own metadata and for a manifest `size` that slightly
+/// understates a file grown at its source. §8.6 fixes this multiplier at 1.1.
+const SPACE_HEADROOM_NUM: u64 = 11;
+const SPACE_HEADROOM_DEN: u64 = 10;
+
+/// Refuses a batch of downloads up front if the disk cannot hold it.
+///
+/// Sums the manifest-declared `size` of every file, pads the total by
+/// [`SPACE_HEADROOM_NUM`]/[`SPACE_HEADROOM_DEN`] (i.e. ×1.1, §8.6), and compares
+/// it against the space *available to the user* — not the raw free space, which
+/// includes root-reserved blocks a normal download can never touch — on the
+/// filesystem that holds `dir`.
+///
+/// The whole point is *up front*: without it, a 14GB model on a disk with 12GB
+/// free streams happily for an hour and then dies with the partition full. On a
+/// root filesystem that is not merely a failed download but a machine that may
+/// no longer boot, so the check is a hard gate before the first byte (RISK-6).
+///
+/// `dir` need not exist yet — a not-yet-created `models/` sits on the same
+/// filesystem as the appdata root above it, so the check probes the nearest
+/// ancestor that does exist.
+pub fn ensure_space(dir: &Path, sizes: impl IntoIterator<Item = u64>) -> Result<(), DownloadError> {
+    let total = sizes.into_iter().fold(0u64, u64::saturating_add);
+    // Multiply before dividing so the padding is faithful to ×1.1. An absurd
+    // total whose padded requirement overflows u64 clamps to u64::MAX — no real
+    // disk is that large, so it fails the check, which is the safe way to be
+    // wrong. (Saturating the multiply alone would divide u64::MAX back down to a
+    // tenth of it and could wave a preposterous total through.)
+    let needed = total
+        .checked_mul(SPACE_HEADROOM_NUM)
+        .map(|padded| padded.div_ceil(SPACE_HEADROOM_DEN))
+        .unwrap_or(u64::MAX);
+
+    let available = available_at(dir).map_err(|source| DownloadError::Io {
+        path: dir.display().to_string(),
+        source,
+    })?;
+
+    if available < needed {
+        return Err(DownloadError::InsufficientSpace {
+            dir: dir.to_owned(),
+            needed,
+            available,
+        });
+    }
+    Ok(())
+}
+
+/// Available space on the filesystem holding `dir`.
+///
+/// `statvfs` needs a path that exists, and the models directory may not be
+/// created until the first download, so this walks up to the nearest existing
+/// ancestor — which is on the same filesystem, that being the only thing the
+/// answer depends on.
+fn available_at(dir: &Path) -> std::io::Result<u64> {
+    let mut probe = dir;
+    loop {
+        match fs4::available_space(probe) {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => match probe.parent() {
+                Some(parent) => probe = parent,
+                None => return Err(e),
+            },
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Bytes as gibibytes, for the space-precheck message only — where a lossy
+/// `f64` rounded to a tenth is exactly the right resolution.
+fn gib(bytes: u64) -> f64 {
+    bytes as f64 / (1u64 << 30) as f64
 }
 
 /// Downloads `url` to `dest`, verified against `sha256`, resuming an existing
@@ -807,6 +902,90 @@ mod tests {
             Duration::from_millis(8_000),
             "must stay capped"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // #19: the free-space precheck. `available_at` reads the real filesystem,
+    // so the boundary cases are pinned to whatever it reports for the temp dir
+    // rather than to an absolute number that would differ per machine.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn a_batch_that_clearly_fits_is_allowed() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        // A handful of kilobytes cannot exhaust a disk with room for a temp dir.
+        ensure_space(tmp.path(), [1_024u64, 2_048, 4_096]).expect("a tiny batch must fit");
+    }
+
+    #[test]
+    fn a_batch_larger_than_the_disk_is_refused_up_front() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let available = available_at(tmp.path()).expect("available space");
+
+        // A single file the exact size of the free space still fails: the ×1.1
+        // headroom pushes the requirement past what is there. This is the proof
+        // the multiplier is applied and not silently dropped.
+        let err = ensure_space(tmp.path(), [available]).expect_err("must not fit");
+        match err {
+            DownloadError::InsufficientSpace {
+                needed,
+                available: reported,
+                ..
+            } => {
+                assert!(needed > available, "the requirement includes the headroom");
+                // The reported free space is the same reading, give or take
+                // whatever the OS did to the disk in between.
+                assert!(reported <= available.saturating_add(1 << 20));
+            }
+            other => panic!("expected InsufficientSpace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_declared_sizes_are_summed_across_files() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let available = available_at(tmp.path()).expect("available space");
+
+        // Two halves of the free space, padded, come to ~0.55× it — comfortably
+        // under — so the batch fits only if the sizes are added together. A
+        // per-file check against the same disk would also pass, so to make the
+        // summation load-bearing, split *just over half* the disk across two
+        // files: neither half alone forces a refusal, but their sum does.
+        let each = available / 2 + available / 8;
+        let err =
+            ensure_space(tmp.path(), [each, each]).expect_err("the sum must overflow the disk");
+        assert!(matches!(err, DownloadError::InsufficientSpace { .. }));
+    }
+
+    #[test]
+    fn the_check_tolerates_a_not_yet_created_models_dir() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        // A path several levels below anything that exists: the check must probe
+        // up to the temp dir rather than error on the missing leaf.
+        let unborn = tmp.path().join("models/flux/weights");
+        assert!(!unborn.exists());
+        ensure_space(&unborn, [1_024u64]).expect("a missing dir resolves to its ancestor");
+    }
+
+    #[test]
+    fn an_empty_batch_needs_no_space() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        ensure_space(tmp.path(), []).expect("nothing to download always fits");
+    }
+
+    #[test]
+    fn a_total_whose_padding_overflows_clamps_shut_rather_than_wrapping() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        // A total so large that ×1.1 overflows u64. The requirement must clamp to
+        // u64::MAX and refuse — not saturate the multiply and divide back down to
+        // a tenth of it, which a real disk could conceivably satisfy.
+        let err = ensure_space(tmp.path(), [u64::MAX]).expect_err("must refuse");
+        match err {
+            DownloadError::InsufficientSpace { needed, .. } => {
+                assert_eq!(needed, u64::MAX, "the overflowed requirement fails closed");
+            }
+            other => panic!("expected InsufficientSpace, got {other:?}"),
+        }
     }
 
     // ---------------------------------------------------------------------
