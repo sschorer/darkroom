@@ -8,7 +8,7 @@ Sizes: **S** ≈ an evening · **M** ≈ a weekend · **L** ≈ several sessions
 |---|---|---|---|
 | **M0** Walking skeleton | One image, on your machine, ugly | 11 | 2–3 weekends |
 | **M1** Registry + downloads | ADR-005 made real | 11 | 3–4 weekends |
-| **M2** The app | Something you'd use daily | 9 | 4–6 weekends |
+| **M2** The app | Something you'd use daily | 11 | 4–6 weekends |
 | **M3** Distribution | Installable by strangers | 9 | 3–4 weekends |
 | **M4** Public | Contributions possible | 8 | 2 weekends |
 
@@ -157,26 +157,52 @@ Goal: **ADR-005 stops being a theory.** Models become data.
 
 ## M2 — The app
 
-Goal: **something you'd actually open.**
+Goal: **something you'd actually open.** Built to the **Studio** design —
+`docs/Darkroom Studio.dc.html` is the visual source of truth for every issue
+below; "matches the mockup" is an acceptance criterion, compared at 1440 × 920.
+Detailed GH issue specs live in `docs/Milestone 2 - GitHub issues.md`.
 
-### #23 · feat(ui): manifest-driven params form
-**M** · needs #16 #20 — form fields generated from `params`, respecting min/max/default
-### #24 · feat(ui): generation queue
-**M** · needs #10 — submit, progress, cancel, sequential
-### #25 · feat(ui): gallery
-**M** · needs #24 — render `/view` outputs, image + video
-### #26 · feat(ui): history in sqlite
-**M** · needs #25 — prompt, seed, model, params; re-use a past generation's settings
-### #27 · feat(ui): model picker
-**S** · needs #20 #21 — install state, gating reasons, license shown (OC-2)
-### #28 · feat(ui): error surfacing
-**M** · needs #8 #10 — `node_errors` by name; engine log tail on spawn failure (QS-3)
-### #29 · feat(ui): first-run onboarding
-**M** · needs #5 #21 — bootstrap → pick a model → first prompt, as one flow
-### #30 · feat(ui): offline verification
-**S** · needs #24 — QS-1: pull the network, generate, assert nothing degrades
-### #31 · design: visual pass
-**L** · needs #29 — it's a *darkroom*; make it look like one, not a bootstrap template
+The M2 shell is a three-screen app (**Setup / Studio / Settings**) inside custom
+window chrome (min/max/close, `decorations: false`). Model *selection* lives in
+the compose bar; full install/remove/gating **management** moves to a new
+Settings page. File #23 (foundations) before any screen work — everything
+references its tokens.
+
+### #23 · design: foundations — tokens, type, window chrome
+**M** · no deps — colour tokens, Space Grotesk + JetBrains Mono type scale, and
+the 1440 × 920 window shell (custom titlebar, safelight dot, min/max/close),
+verbatim from the mockup. Everything else references these.
+### #24 · feat(ui): Studio shell — left rail + screen routing
+**M** · needs #23 — Setup/Studio/Settings routing; 184px left rail (Library
+counts, live queue block, pinned ⚙ Settings button)
+### #25 · feat(ui): compose bar + model selector
+**M** · needs #24 #16 #20 — floating compose bar; model-selector pill with VRAM
+gating reasons + license (OC-2); prompt input; param chips; Generate
+### #26 · feat(ui): manifest-driven params form
+**M** · needs #16 #20 — fields generated from `params` (min/max/default); feed
+`buildWorkflow()`, throw on missing node; rendered as the compose-bar chips (#25)
+### #27 · feat(ui): generation queue + live-generating tile
+**M** · needs #10 — submit, sequential, cancel; `client_id` matches WS + `/prompt`;
+in-grid live tile (step bar + cancel) that the finished image replaces
+### #28 · feat(ui): gallery + selected preview
+**M** · needs #27 — 452px selected preview (★/⤓, recipe chips, ↻ reuse recipe) +
+4-col grid; `/view` bytes → `blob:` (ADR-008); image and video both render
+### #29 · feat(ui): error surfacing
+**M** · needs #8 #10 — node-error banner above the compose bar + failed tile in
+the grid, text driven by real `node_errors`; engine-log tail on spawn failure
+(QS-3); version-skew blocks generation until `.version == comfy.lock`
+### #30 · feat(ui): Settings — model manager + engine + storage + privacy
+**L** · needs #24 #17 #21 — install/remove, storage meter, VRAM gating (disable,
+don't hide), engine info, privacy toggle, per-model licenses before install (OC-2)
+### #31 · feat(ui): first-run onboarding
+**M** · needs #27 #21 — bootstrap → pick a model → first prompt as one flow; byte
+progress, not a spinner; a non-technical user reaches their first image (Q2)
+### #32 · feat(ui): offline verification
+**S** · needs #27 — QS-1: pull the network, generate, assert nothing degrades but
+the skippable update check
+### #33 · design: visual pass sign-off
+**L** · needs #31 — final QA that the built app matches the mockup across Setup,
+Studio, and Settings; no default framework styling remains
 
 ---
 
@@ -184,26 +210,26 @@ Goal: **something you'd actually open.**
 
 Goal: **a stranger can install it.**
 
-### #32 · ci: registry + frontend + rust jobs
+### #34 · ci: registry + frontend + rust jobs
 **M** · needs #13 — `pull_request`, never `pull_request_target`; rust matrix ×3 OS
-### #33 · ci: bundle smoke matrix
-**M** · needs #32 — `tauri build --no-bundle`, unsigned must succeed or forks can't build
-### #34 · build: appimage
-**M** · needs #33 — build on **ubuntu-22.04** (TC-4); bundle WebKitGTK
-### #35 · build: macos dmg ×2 arch — filed early as [GH #23](https://github.com/sschorer/darkroom/issues/23)
-**L** · needs #33 — **includes the notarization decision (RISK-2).** $99/yr or ship unsigned with `xattr` docs. Decide before writing code; it changes the updater's behaviour.
-### #36 · build: windows nsis — filed early as [GH #24](https://github.com/sschorer/darkroom/issues/24)
-**M** · needs #33
-### #37 · feat(updater): keys + latest.json + check flow
-**L** · needs #34 #35 #36 — minisign keypair, **offline backup** (RISK-3), defer while queue busy
-### #38 · feat(updater): engine teardown on update
-**S** · needs #37 #9 — `on_before_exit`; NSIS kills the process without asking
-### #39 · test: the actual upgrade path
-**M** · needs #37 · **the one everyone skips**
+### #35 · ci: bundle smoke matrix
+**M** · needs #34 — `tauri build --no-bundle`, unsigned must succeed or forks can't build
+### #36 · build: appimage
+**M** · needs #35 — build on **ubuntu-22.04** (TC-4); bundle WebKitGTK
+### #37 · build: macos dmg ×2 arch — filed early as [GH #23](https://github.com/sschorer/darkroom/issues/23)
+**L** · needs #35 — **includes the notarization decision (RISK-2).** $99/yr or ship unsigned with `xattr` docs. Decide before writing code; it changes the updater's behaviour.
+### #38 · build: windows nsis — filed early as [GH #24](https://github.com/sschorer/darkroom/issues/24)
+**M** · needs #35
+### #39 · feat(updater): keys + latest.json + check flow
+**L** · needs #36 #37 #38 — minisign keypair, **offline backup** (RISK-3), defer while queue busy
+### #40 · feat(updater): engine teardown on update
+**S** · needs #39 #9 — `on_before_exit`; NSIS kills the process without asking
+### #41 · test: the actual upgrade path
+**M** · needs #39 · **the one everyone skips**
 - Ship v0.1.0, install for real, tag v0.1.1, let it update itself
 - **Done:** it works on all three platforms. Almost every updater bug only exists on the second version.
-### #40 · ci: release workflow
-**M** · needs #37 — `tauri-action`, 4-way matrix, `includeUpdaterJson`, draft releases
+### #42 · ci: release workflow
+**M** · needs #39 — `tauri-action`, 4-way matrix, `includeUpdaterJson`, draft releases
 
 ---
 
@@ -211,31 +237,31 @@ Goal: **a stranger can install it.**
 
 Goal: **someone else can contribute.**
 
-### #41 · ci(vouch): pr-vouch + vouch-manage
+### #43 · ci(vouch): pr-vouch + vouch-manage
 **S** — files written; add your handle to `VOUCHED.td`
-### #42 · chore: coderabbit config
+### #44 · chore: coderabbit config
 **S** — written; needs the GitHub App installed
-### #43 · ci: pr title check + commitlint
+### #45 · ci: pr title check + commitlint
 **S** — plus repo settings: **squash-only**, default message = **PR title**
-### #44 · docs: SECURITY.md
+### #46 · docs: SECURITY.md
 **S** · ⚠️ CONTRIBUTING already links to this and it doesn't exist
-### #45 · docs: issue + PR templates
+### #47 · docs: issue + PR templates
 **M** — model PR template carrying the `tested_on` attestation checklist
-### #46 · docs: README + screenshots
+### #48 · docs: README + screenshots
 **M** — the thing that decides whether anyone tries it
-### #47 · feat(registry): stage wan22 + z-image-turbo
+### #49 · feat(registry): stage wan22 + z-image-turbo
 **M** · needs #13 — `enabled: false`, real `tested_on`; proves the middle path works
-### #48 · chore: v0.1.0
-**S** · needs #39 — branch protection on, publish the draft
+### #50 · chore: v0.1.0
+**S** · needs #41 — branch protection on, publish the draft
 
 ---
 
 ## Notes
 
-**Numbers in this file are plan numbers, not GitHub issue numbers.** They coincide for #1–#22 (M0+M1, seeded in order). They diverge for anything filed out of sequence: macOS bundling is plan #35 but [GH #23](https://github.com/sschorer/darkroom/issues/23), Windows is plan #36 but [GH #24](https://github.com/sschorer/darkroom/issues/24). When M2 gets seeded its issues will start at GH #25, so the "#23–#31" below means *plan* numbers. Cite `GH #n` when you mean the live issue.
+**Numbers in this file are plan numbers, not GitHub issue numbers.** They coincide for #1–#22 (M0+M1, seeded in order). They diverge for anything filed out of sequence: macOS bundling is plan #37 but [GH #23](https://github.com/sschorer/darkroom/issues/23), Windows is plan #38 but [GH #24](https://github.com/sschorer/darkroom/issues/24). M2's live GH issues are **GH #52–#62**, plan #23–#33 in order (see `docs/Milestone 2 - GitHub issues.md`), so the plan numbers ≠ their GH numbers here too. Cite `GH #n` when you mean the live issue.
 
-**Order that matters:** #4 before anything else substantial. #11 gates M1. #18 and #39 are the two that get skipped and shouldn't be — they're the tests for bugs that appear an hour later on someone else's machine.
+**Order that matters:** #4 before anything else substantial. #11 gates M1. #23 (foundations) before any other M2 screen work — everything references its tokens. #18 and #41 are the two tests that get skipped and shouldn't be — they're the tests for bugs that appear an hour later on someone else's machine.
 
 **Order that doesn't:** M4 is nearly all done already; it's just files that need enabling.
 
-**Parallelisable if you're not alone:** M2's UI work (#23–#31) against M1's plumbing. Everything in M0 is serial.
+**Parallelisable if you're not alone:** M2's UI work (#23–#33) against M1's plumbing, once #23 lands. Everything in M0 is serial.

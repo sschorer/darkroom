@@ -727,7 +727,7 @@ fn write_pid_file(path: &Path, pid: u32) -> Result<(), PidError> {
 /// file rather than a live handle: boot (before this session might spawn its
 /// own engine) reclaims a leak from a hard-killed run, and
 /// `RunEvent::ExitRequested` stops the engine this session started. The updater
-/// path (`on_before_exit`) joins them in #38.
+/// path (`on_before_exit`) joins them in #40.
 ///
 /// The record is cleared only once it has done its job: the engine is gone —
 /// killed, already dead, or the PID now belongs to a stranger. If a kill we
