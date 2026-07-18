@@ -1,0 +1,14 @@
+# Where ts-rs writes the generated IPC types (ADR-018).
+#
+# ts-rs resolves a `#[ts(export_to)]` relative to a base directory and refuses to
+# let that path escape the base with `..`. The types belong in the frontend at
+# `app/lib/generated/`, a sibling of this crate — unreachable from an in-crate
+# `export_to`. Setting the base here, once, points every derive's `export_to =
+# "./"` at that directory, so a bare `cargo test --all-features` regenerates in
+# the right place with no per-command flag (which is what lets CI diff it).
+#
+# `relative = true` resolves the value from this file's directory (native/), so
+# it is `native/../app/lib/generated` = the repo's `app/lib/generated`,
+# independent of where cargo was invoked from.
+[env]
+TS_RS_EXPORT_DIR = { value = "../app/lib/generated", relative = true }

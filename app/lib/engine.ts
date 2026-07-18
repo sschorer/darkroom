@@ -1,30 +1,35 @@
 /**
- * The engine IPC surface, mirroring `native/src/engine/bootstrap.rs`.
+ * The engine IPC surface: the `invoke`/`listen` wrappers, over types generated
+ * from Rust.
  *
- * Hand-written and therefore capable of drifting from the Rust that produces it.
- * That's tolerable at two commands and is not a pattern to grow: once the engine
- * has a real API (#10 onwards), this wants generating or schema-checking, the
- * way the registry's one definition is shared rather than copied.
+ * The payload *shapes* — `Installed`, `Status`, `Progress`, `LogLine` — are no
+ * longer hand-copied from `native/src`. ts-rs generates them into
+ * `./generated/` from the same structs Tauri serialises, and CI regenerates and
+ * diffs them, so a renamed field or a changed serde tag fails the build instead
+ * of silently emptying a view at runtime (ADR-018). This file keeps only what
+ * can't be generated: the command names, the event names, and the thin wrappers
+ * that bind them.
+ *
+ * The app's older names are preserved as aliases (`EngineStatus`,
+ * `EngineProgress`, `EngineLog`) so callers didn't have to churn when the source
+ * of truth moved.
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import type { Accelerator } from "./generated/Accelerator";
+import type { Installed } from "./generated/Installed";
+import type { LogLine } from "./generated/LogLine";
+import type { Progress } from "./generated/Progress";
+import type { Status } from "./generated/Status";
+
 /** What torch found. `cuda` is the only supported generation path (TD-2). */
-export type Accelerator = "cuda" | "mps" | "cpu";
-
+export type { Accelerator };
 /** `engine/.version`. Its presence on disk means the install is whole. */
-export interface Installed {
-  comfy_sha: string;
-  lock_digest: string;
-  accelerator: Accelerator;
-  /** e.g. `2.13.0+cu129`. A bare `2.13.0` is a CPU wheel — see #4. */
-  torch: string;
-}
+export type { Installed };
 
-export type EngineStatus =
-  | { state: "missing" }
-  | { state: "stale"; installed: Installed; pinned: string }
-  | { state: "ready"; installed: Installed };
+/** The engine's install state, as `engine_status` reports it. */
+export type EngineStatus = Status;
 
 export const engineStatus = () => invoke<EngineStatus>("engine_status");
 
@@ -46,23 +51,17 @@ export const bootstrapEngine = () => invoke<Installed>("bootstrap_engine");
  * the same port rather than spawning a second one, so a "Generate" button can
  * call it unconditionally. Resolves only once the engine really answers
  * `/system_stats` (up to 120s on a cold start), or rejects with the actionable
- * message the sidecar built — which points at the engine log on a failed boot.
+ * message the sidecar built — which points at the engine log on a failed boot,
+ * and fails fast if the engine exits during startup rather than after the
+ * timeout.
  */
 export const startEngine = () => invoke<number>("start_engine");
 
 /**
- * A bootstrap progress update, mirroring `engine::progress::Progress`. Tagged
- * by `phase` so it reads as a discriminated union — narrow on `phase`.
+ * A bootstrap progress update. Tagged by `phase` so it reads as a discriminated
+ * union — narrow on `phase`. Generated from `engine::progress::Progress`.
  */
-export type EngineProgress =
-  /** Fetching the ComfyUI tarball. `total` is null when the server sent no Content-Length. */
-  | { phase: "downloading"; received: number; total: number | null }
-  /** Expanding the tarball into the checkout. */
-  | { phase: "unpacking" }
-  /** A uv step is running; `line` is uv's latest output line. */
-  | { phase: "installing"; step: string; line: string }
-  /** Importing torch to see what hardware it found. */
-  | { phase: "verifying" };
+export type EngineProgress = Progress;
 
 /**
  * Subscribes to bootstrap progress. Resolves to an unlisten function — call it
@@ -72,14 +71,11 @@ export const onEngineProgress = (cb: (p: EngineProgress) => void): Promise<Unlis
   listen<EngineProgress>("engine://progress", (e) => cb(e.payload));
 
 /**
- * One captured line of engine output, mirroring `sidecar::LogLine`. `stream`
- * distinguishes ComfyUI's stdout from the stderr its tracebacks print to, so the
- * UI can tell an error line from ordinary chatter.
+ * One captured line of engine output. `stream` distinguishes ComfyUI's stdout
+ * from the stderr its tracebacks print to, so the UI can tell an error line from
+ * ordinary chatter. Generated from `sidecar::LogLine`.
  */
-export interface EngineLog {
-  stream: "stdout" | "stderr";
-  line: string;
-}
+export type EngineLog = LogLine;
 
 /**
  * Subscribes to the engine's live log. The same lines are also written to a

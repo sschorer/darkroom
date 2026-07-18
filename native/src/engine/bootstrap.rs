@@ -149,6 +149,7 @@ pub enum BootstrapError {
 /// say so plainly, and lets VRAM gating (#20) make the real decision with the
 /// real numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "./"))]
 #[serde(rename_all = "lowercase")]
 pub enum Accelerator {
     /// What every supported configuration should report (§7.2).
@@ -161,6 +162,7 @@ pub enum Accelerator {
 
 /// The contents of `engine/.version`. Presence means the install is whole.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "./"))]
 pub struct Installed {
     /// The commit. For humans and for the log — the comparison uses `lock_digest`.
     pub comfy_sha: String,
@@ -178,6 +180,7 @@ pub struct Installed {
 
 /// Whether the engine on disk can be used.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "./"))]
 #[serde(tag = "state", rename_all = "lowercase")]
 pub enum Status {
     /// Never provisioned, or provisioned and since broken. Both need the same

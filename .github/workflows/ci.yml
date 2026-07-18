@@ -95,6 +95,15 @@ jobs:
       - run: cargo test --all-features
         working-directory: native
 
+      # Fail if the checked-in ts-rs mirror drifted from the Rust IPC types
+      # (ADR-018). Delegated to the Makefile so this and local `make check` run
+      # the identical gate — CLAUDE.md keeps command flags in the Makefile alone.
+      # Linux only: one runner is enough to diff, and it sidesteps CRLF churn on
+      # the Windows tree that the all-OS `cargo test` above would leave.
+      - name: IPC bindings are in sync
+        if: matrix.os == 'ubuntu-22.04'
+        run: make bindings-check
+
   # Proves the thing still bundles. Unsigned, artifacts discarded.
   # Catches "works in dev, explodes in tauri build" before a release tag does.
   build:

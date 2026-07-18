@@ -75,10 +75,12 @@ struct Running {
 /// The order is load-bearing. The log pump is spawned *before* the health wait,
 /// because ComfyUI's boot output — including the traceback of a failed node
 /// import — arrives during that wait, and an undrained pipe would back-pressure
-/// the engine into a hang (`sidecar::pump`). If the engine never answers, the
-/// just-spawned child is killed here rather than left holding the GPU until
-/// teardown; the port and error come from `sidecar`, whose `Display` already
-/// points at the engine log (§8.6).
+/// the engine into a hang (`sidecar::pump`). The pump also carries the exit
+/// signal the health wait races against, so a ComfyUI that dies importing a node
+/// fails in seconds rather than making the user wait out the startup budget. If
+/// the engine never answers (or exits), the just-spawned child is killed here
+/// rather than left holding the GPU until teardown; the port and error come from
+/// `sidecar`, whose `Display` already points at the engine log (§8.6).
 #[tauri::command]
 pub async fn start_engine<R: Runtime>(
     app: AppHandle<R>,
@@ -105,10 +107,18 @@ pub async fn start_engine<R: Runtime>(
     } = sidecar::spawn(&app, &paths).map_err(|e| e.to_string())?;
 
     // Drain the pipe from the moment the process exists — before the health
-    // wait, not after (see the fn doc).
-    tauri::async_runtime::spawn(sidecar::pump(app.clone(), events, paths.engine_log()));
+    // wait, not after (see the fn doc). The pump reports the process's exit down
+    // this channel; the health wait races that against the socket poll so a boot
+    // that dies fails at once instead of after the whole startup budget.
+    let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+    tauri::async_runtime::spawn(sidecar::pump(
+        app.clone(),
+        events,
+        paths.engine_log(),
+        exit_tx,
+    ));
 
-    if let Err(e) = sidecar::wait_until_healthy(port).await {
+    if let Err(e) = sidecar::wait_until_healthy(port, exit_rx).await {
         let _ = child.kill();
         return Err(e.to_string());
     }

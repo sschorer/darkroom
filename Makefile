@@ -78,7 +78,7 @@ smoke: sidecar ## Bundle smoke — must succeed unsigned, or forks can't build
 # ---------------------------------------------------------------- checks
 
 .PHONY: check
-check: lint fmt-check typecheck test rust-fmt rust-lint rust-test ## Everything CI gates. Run before pushing.
+check: lint fmt-check typecheck test rust-fmt rust-lint rust-test bindings-check ## Everything CI gates. Run before pushing.
 
 .PHONY: lint
 lint: ## eslint
@@ -125,6 +125,15 @@ rust-lint: sidecar ## cargo clippy, warnings are errors
 .PHONY: rust-test
 rust-test: sidecar ## cargo test
 	cd $(CARGO_DIR) && cargo test --all-features
+
+.PHONY: bindings
+bindings: sidecar ## Regenerate the TS IPC types from Rust (ts-rs, ADR-018)
+	cd $(CARGO_DIR) && cargo test --features ts export_bindings
+
+.PHONY: bindings-check
+bindings-check: bindings ## Fail if the generated TS types drifted from Rust (CI gate)
+	git add --intent-to-add app/lib/generated
+	git diff --exit-code -- app/lib/generated
 
 # ---------------------------------------------------------------- clean
 

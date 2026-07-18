@@ -27,6 +27,7 @@
 //! drives both, and the identity check keeps a recycled PID from costing an
 //! innocent process its life.
 
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::net::{Ipv4Addr, TcpListener};
@@ -39,6 +40,7 @@ use tauri::async_runtime::Receiver;
 use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
+use tokio::sync::oneshot;
 
 use crate::paths::Paths;
 
@@ -53,6 +55,16 @@ const HEALTH_PATH: &str = "/system_stats";
 /// How often to re-probe while the engine is starting.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
+/// How many trailing engine-output lines a startup-exit error carries (§8.6).
+/// Enough to hold a Python traceback, bounded so a chatty boot can't grow the
+/// error without limit — the same budget `bootstrap.rs` gives its uv tail.
+const EXIT_TAIL_LINES: usize = 40;
+
+/// Per-line byte cap for that tail, so a single newline-less blob can't ride in
+/// whole. The engine's output is line-split by the plugin already; this is the
+/// belt-and-suspenders against a pathological line.
+const EXIT_TAIL_LINE_BYTES: usize = 2 * 1024;
+
 /// The whole startup budget. ComfyUI's first boot imports torch and every
 /// custom node, which is slow; 120s is generous for that yet short enough that a
 /// genuinely dead engine surfaces as an error rather than an app that hangs
@@ -60,7 +72,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The Tauri event each captured log line is emitted on, so a running UI can
-/// show the engine's output live. Mirrored by `app/lib/engine.ts`.
+/// show the engine's output live. The payload type is generated for
+/// `app/lib/engine.ts` by ts-rs (ADR-018); this event *name* is matched by hand
+/// on the TS side.
 pub const LOG_EVENT: &str = "engine://log";
 
 /// Roll the engine log once appending the next line would push it past this.
@@ -130,6 +144,39 @@ pub enum HealthError {
         STARTUP_TIMEOUT.as_secs()
     )]
     Timeout { port: u16 },
+
+    #[error(
+        "the engine exited during startup (code {code:?}, signal {signal:?}) before \
+         it answered on {LOOPBACK}:{port}.\n  \
+         A failing node import is the usual cause; the full log is at Help → Open \
+         Logs. Recent engine output:\n\n{tail}"
+    )]
+    Exited {
+        port: u16,
+        code: Option<i32>,
+        signal: Option<i32>,
+        /// The engine's last lines before it died — the traceback, usually. Kept
+        /// on the error so the message is actionable on its own (§8.6), not a
+        /// bare exit code pointing elsewhere.
+        tail: String,
+    },
+}
+
+/// How the engine process ended, as the log pump ([`pump`]) saw it.
+///
+/// Handed from the pump to the health wait so a boot that dies importing a node
+/// fails in the seconds it actually took — carrying the exit code *and* the tail
+/// of what the engine printed before dying — rather than making the frontend
+/// wait out the whole [`STARTUP_TIMEOUT`] for a timeout the process had already
+/// decided. The pump watches the *process* (and holds its recent output); the
+/// health poll watches the *socket*; racing the two is what turns a fast failure
+/// into a fast, actionable error (§6.2, §8.6).
+#[derive(Debug, Clone)]
+pub struct EngineExit {
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+    /// The last [`EXIT_TAIL_LINES`] the engine emitted before it terminated.
+    pub tail: String,
 }
 
 /// A running engine and the port it was told to serve on.
@@ -197,7 +244,8 @@ pub fn spawn<R: Runtime>(app: &AppHandle<R>, paths: &Paths) -> Result<Engine, Sp
     })
 }
 
-/// Waits until the engine on `port` answers, or gives up after [`STARTUP_TIMEOUT`].
+/// Waits until the engine on `port` answers, the process dies, or the
+/// [`STARTUP_TIMEOUT`] budget runs out — whichever comes first.
 ///
 /// [`spawn`] returns the instant the process exists; this is the other half —
 /// the caller turns a spawned handle into a *ready* one by awaiting this before
@@ -205,12 +253,50 @@ pub fn spawn<R: Runtime>(app: &AppHandle<R>, paths: &Paths) -> Result<Engine, Sp
 /// in boot, so a response to `/system_stats` is the first moment the port is
 /// worth anything.
 ///
-/// Note this watches the socket, not the process: a ComfyUI that dies during
-/// startup simply stops answering and this reports a [`HealthError::Timeout`]
-/// once the budget runs out. The engine log (#8) is where the actual traceback
-/// lands, which is why the error points there.
-pub async fn wait_until_healthy(port: u16) -> Result<(), HealthError> {
-    poll_until_healthy(port, POLL_INTERVAL, STARTUP_TIMEOUT).await
+/// The health *poll* watches the socket, not the process, so on its own a
+/// ComfyUI that dies importing a node would only surface after the full budget
+/// elapsed — two minutes of "Starting…" for a failure the process decided in
+/// three seconds. `exited` closes that gap: the log pump ([`pump`]) fires it the
+/// moment it sees the process terminate, and this races it against the poll, so
+/// a boot that fails fast fails fast (with the exit code, via
+/// [`HealthError::Exited`]). The engine log (#8) is where the actual traceback
+/// lands, which is why every arm's error points there.
+pub async fn wait_until_healthy(
+    port: u16,
+    exited: oneshot::Receiver<EngineExit>,
+) -> Result<(), HealthError> {
+    race_until_healthy(port, POLL_INTERVAL, STARTUP_TIMEOUT, exited).await
+}
+
+/// The socket poll and the process-exit signal, raced with their cadence and
+/// budget injected so tests drive it in milliseconds rather than the two-minute
+/// production timeout.
+async fn race_until_healthy(
+    port: u16,
+    interval: Duration,
+    timeout: Duration,
+    exited: oneshot::Receiver<EngineExit>,
+) -> Result<(), HealthError> {
+    // A dropped sender — the pump ended without ever seeing a `Terminated`
+    // event, which shouldn't happen but the type permits — must not read as an
+    // exit and forge a failure. Fall back to never firing, leaving the poll to
+    // reach its own verdict (a healthy answer, or the timeout).
+    let on_exit = async {
+        match exited.await {
+            Ok(info) => info,
+            Err(_) => std::future::pending::<EngineExit>().await,
+        }
+    };
+
+    tokio::select! {
+        res = poll_until_healthy(port, interval, timeout) => res,
+        info = on_exit => Err(HealthError::Exited {
+            port,
+            code: info.code,
+            signal: info.signal,
+            tail: info.tail,
+        }),
+    }
 }
 
 /// The health loop with its cadence and budget injected, so tests can drive it
@@ -283,6 +369,7 @@ pub async fn is_responding(port: u16) -> bool {
 /// tracebacks, so the frontend can colour it — hence carrying the distinction
 /// on the wire even though the file keeps the lines verbatim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "./"))]
 #[serde(rename_all = "lowercase")]
 enum Stream {
     Stdout,
@@ -291,10 +378,12 @@ enum Stream {
 
 /// One captured line of engine output, as it crosses to the frontend.
 ///
-/// `{ "stream": "stderr", "line": "…" }`. Mirrored by `app/lib/engine.ts`; the
-/// serialize tests below pin the shape so a rename can't silently break the log
-/// view, the same guard `progress.rs` gives its enum.
+/// `{ "stream": "stderr", "line": "…" }`. Its TS type is generated by ts-rs
+/// (ADR-018); the serialize tests below pin the actual serde JSON — the lowercase
+/// `stream` tags, the two fields — the half ts-rs can't see, the same guard
+/// `progress.rs` gives its enum.
 #[derive(Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "./"))]
 struct LogLine {
     stream: Stream,
     line: String,
@@ -359,21 +448,78 @@ fn decode(bytes: &[u8]) -> String {
 /// traceback survives the window closing, and on [`LOG_EVENT`] so a running UI
 /// can show it live (§8.6). The emit is best-effort for the reason progress is:
 /// nothing about keeping the pipe drained may depend on anyone listening.
+///
+/// The pump also owns the one place that sees the process end: on the
+/// `Terminated` event it fires `on_exit` so a health wait racing this can fail
+/// the instant the engine dies (see [`wait_until_healthy`]). It carries the
+/// engine's recent output along, so a startup death is an actionable error with
+/// the traceback in it, not a bare code pointing at a log (§8.6). Firing is
+/// best-effort too — once the engine is healthy the receiver is long dropped,
+/// and a send to a dropped receiver is the ordinary, ignorable case.
 pub async fn pump<R: Runtime>(
     app: AppHandle<R>,
     mut events: Receiver<CommandEvent>,
     log_path: PathBuf,
+    on_exit: oneshot::Sender<EngineExit>,
 ) {
     let mut log = RotatingLog::open(log_path, LOG_MAX_BYTES, LOG_KEEP);
+    // Taken on the first `Terminated`; a `oneshot::Sender` can only send once,
+    // and the process terminates once.
+    let mut on_exit = Some(on_exit);
+    // A bounded window of the engine's most recent lines, so the exit can carry
+    // the traceback that preceded it. The lines arrive in order, so by the time
+    // `Terminated` lands this already holds the death's cause.
+    let mut recent: VecDeque<String> = VecDeque::with_capacity(EXIT_TAIL_LINES + 1);
 
     while let Some(event) = events.recv().await {
+        // Signal the exit *before* logging it, so the health wait is released as
+        // early as possible; the same event still becomes a log line below. The
+        // tail is what preceded this terminate — the exit line itself is
+        // redundant with the code already in the error.
+        if let CommandEvent::Terminated(payload) = &event {
+            if let Some(tx) = on_exit.take() {
+                let _ = tx.send(EngineExit {
+                    code: payload.code,
+                    signal: payload.signal,
+                    tail: Vec::from(std::mem::take(&mut recent)).join("\n"),
+                });
+            }
+        }
         if let Some(entry) = log_entry(event) {
             // The file gets the line verbatim so a multi-line Python traceback
             // reads as one; the stream tag rides along only to the frontend.
             log.write_line(&entry.line);
+            push_tail(&mut recent, &entry.line);
             let _ = app.emit(LOG_EVENT, &entry);
         }
     }
+}
+
+/// Pushes a line onto the exit-tail ring, evicting the oldest past the cap and
+/// clipping any single line to [`EXIT_TAIL_LINE_BYTES`] so a runaway line can't
+/// grow the tail unbounded.
+fn push_tail(recent: &mut VecDeque<String>, line: &str) {
+    recent.push_back(clip_line(line, EXIT_TAIL_LINE_BYTES));
+    if recent.len() > EXIT_TAIL_LINES {
+        recent.pop_front();
+    }
+}
+
+/// Truncates a line to `max` bytes on a char boundary, marking a cut with an
+/// ellipsis. Runs on lossily-decoded subprocess output, so it must never split a
+/// codepoint. Short lines pass through untouched.
+fn clip_line(line: &str, max: usize) -> String {
+    if line.len() <= max {
+        return line.to_owned();
+    }
+    let mut end = max;
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut clipped = String::with_capacity(end + '…'.len_utf8());
+    clipped.push_str(&line[..end]);
+    clipped.push('…');
+    clipped
 }
 
 /// An append-only log that rolls itself over once it grows past a size cap,
@@ -590,9 +736,11 @@ fn write_pid_file(path: &Path, pid: u32) -> Result<(), PidError> {
 /// best-effort: a teardown that can't read or delete the file must still let the
 /// app exit.
 ///
-/// Assumes one running instance. The reclaim cannot tell *our* leaked engine
-/// from one a second Darkroom legitimately started; enforcing a single instance
-/// is a separate concern, and the whole appdata tree already assumes it.
+/// Requires one running instance, now enforced rather than assumed (ADR-017):
+/// the single-instance plugin turns a second launch away before it could reach
+/// this. That enforcement is load-bearing here — without it, a second Darkroom's
+/// boot reclaim would find the first's PID file, confirm the identity (same
+/// `main.py`, same start time), and `SIGKILL` a live engine mid-generation.
 pub fn reclaim_stale(paths: &Paths) {
     let path = paths.engine_pid();
 
@@ -841,14 +989,138 @@ mod tests {
         );
     }
 
+    /// The reason the exit race exists: a ComfyUI that dies importing a node
+    /// must surface as an `Exited` error in the seconds it took, not after the
+    /// full startup budget. A dead port would otherwise burn the whole timeout;
+    /// firing the exit signal must beat it and carry the code.
+    #[test]
+    fn exits_at_once_when_the_process_dies_before_answering() {
+        // A refused port stands in for an engine that never binds; without the
+        // exit signal this would run to the (here, long) timeout.
+        let dead = free_port().expect("a free port");
+        let (tx, rx) = oneshot::channel();
+        tx.send(EngineExit {
+            code: Some(1),
+            signal: None,
+            tail: String::new(),
+        })
+        .expect("the receiver is still live");
+
+        let result = tauri::async_runtime::block_on(race_until_healthy(
+            dead,
+            Duration::from_millis(20),
+            Duration::from_secs(30),
+            rx,
+        ));
+
+        assert!(
+            matches!(result, Err(HealthError::Exited { port, code: Some(1), signal: None, .. }) if port == dead),
+            "a process that exits must fail fast as Exited with its code, got {result:?}"
+        );
+    }
+
+    /// §8.6: the fast-fail error must be actionable on its own. The tail the pump
+    /// carried — the traceback that preceded the exit — has to reach the message
+    /// the user sees, not just an exit code pointing at a log.
+    #[test]
+    fn the_exit_error_carries_the_engine_output_tail() {
+        let dead = free_port().expect("a free port");
+        let (tx, rx) = oneshot::channel();
+        tx.send(EngineExit {
+            code: Some(1),
+            signal: None,
+            tail: "ModuleNotFoundError: No module named 'foo'".to_owned(),
+        })
+        .expect("the receiver is still live");
+
+        let result = tauri::async_runtime::block_on(race_until_healthy(
+            dead,
+            Duration::from_millis(20),
+            Duration::from_secs(30),
+            rx,
+        ));
+
+        let message = match result {
+            Err(err @ HealthError::Exited { .. }) => err.to_string(),
+            other => panic!("expected an Exited error, got {other:?}"),
+        };
+        assert!(
+            message.contains("ModuleNotFoundError: No module named 'foo'"),
+            "the engine's traceback tail must reach the user, got: {message}"
+        );
+    }
+
+    /// The pump's tail ring keeps the last lines (a traceback ends at the bottom,
+    /// which is the half worth keeping) and clips a pathological single line so a
+    /// newline-less blob can't grow the exit payload without bound.
+    #[test]
+    fn the_exit_tail_keeps_the_last_lines_and_clips_long_ones() {
+        let mut recent = VecDeque::new();
+        for i in 0..(EXIT_TAIL_LINES + 20) {
+            push_tail(&mut recent, &format!("line {i}"));
+        }
+        assert_eq!(recent.len(), EXIT_TAIL_LINES, "the ring stays bounded");
+        assert_eq!(
+            recent.back().map(String::as_str),
+            Some(format!("line {}", EXIT_TAIL_LINES + 19).as_str()),
+            "the newest line — where a traceback's cause sits — is kept",
+        );
+
+        let mut big = VecDeque::new();
+        push_tail(&mut big, &"x".repeat(10 * EXIT_TAIL_LINE_BYTES));
+        assert!(big[0].ends_with('…'), "an oversized line is clipped");
+        assert!(big[0].len() <= EXIT_TAIL_LINE_BYTES + '…'.len_utf8());
+    }
+
+    /// A health answer must win even when an exit could arrive: an engine that
+    /// comes up cleanly is `Ok`, and the retained sender (never fired) must not
+    /// turn that into a failure.
+    #[test]
+    fn a_healthy_answer_wins_over_a_pending_exit() {
+        let port = serve_one_ok();
+        let (_tx, rx) = oneshot::channel();
+
+        let result = tauri::async_runtime::block_on(race_until_healthy(
+            port,
+            Duration::from_millis(20),
+            Duration::from_secs(5),
+            rx,
+        ));
+
+        assert!(result.is_ok(), "a live engine must be Ok, got {result:?}");
+    }
+
+    /// A dropped sender — the pump gone without ever seeing a `Terminated` —
+    /// must not read as an exit. The poll runs to its own verdict, here a
+    /// timeout, rather than a forged `Exited`.
+    #[test]
+    fn a_dropped_exit_sender_falls_back_to_the_poll() {
+        let dead = free_port().expect("a free port");
+        let (tx, rx) = oneshot::channel::<EngineExit>();
+        drop(tx);
+
+        let result = tauri::async_runtime::block_on(race_until_healthy(
+            dead,
+            Duration::from_millis(5),
+            Duration::from_millis(40),
+            rx,
+        ));
+
+        assert!(
+            matches!(result, Err(HealthError::Timeout { port }) if port == dead),
+            "a dropped sender must leave the poll to time out, not forge an exit, got {result:?}"
+        );
+    }
+
     // --- The log pump ---------------------------------------------------------
 
     use std::fs;
 
-    /// `LogLine` is the wire contract `app/lib/engine.ts` mirrors by hand. These
-    /// pin `stream` to lowercase tags and the two-field shape so a rename fails
-    /// here rather than silently emptying the log view — the same guard
-    /// `progress.rs` gives its enum.
+    /// `LogLine`'s TS type is generated by ts-rs (ADR-018), which checks the
+    /// type structure. These pin the complementary half — the actual serde JSON:
+    /// `stream` as lowercase tags and the two-field shape — so a serde change
+    /// ts-rs can't see still fails here rather than silently emptying the log
+    /// view, the same guard `progress.rs` gives its enum.
     #[test]
     fn a_log_line_serializes_with_stream_and_line() {
         assert_eq!(
