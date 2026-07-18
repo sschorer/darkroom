@@ -222,13 +222,15 @@ const SPACE_HEADROOM_DEN: u64 = 10;
 /// ancestor that does exist.
 pub fn ensure_space(dir: &Path, sizes: impl IntoIterator<Item = u64>) -> Result<(), DownloadError> {
     let total = sizes.into_iter().fold(0u64, u64::saturating_add);
-    // Multiply before dividing so the padding is faithful to ×1.1; saturate so
-    // an absurd total can't overflow into a small number that would wave it
-    // through — it caps at u64::MAX and fails the check, which is the safe way
-    // to be wrong here.
+    // Multiply before dividing so the padding is faithful to ×1.1. An absurd
+    // total whose padded requirement overflows u64 clamps to u64::MAX — no real
+    // disk is that large, so it fails the check, which is the safe way to be
+    // wrong. (Saturating the multiply alone would divide u64::MAX back down to a
+    // tenth of it and could wave a preposterous total through.)
     let needed = total
-        .saturating_mul(SPACE_HEADROOM_NUM)
-        .div_ceil(SPACE_HEADROOM_DEN);
+        .checked_mul(SPACE_HEADROOM_NUM)
+        .map(|padded| padded.div_ceil(SPACE_HEADROOM_DEN))
+        .unwrap_or(u64::MAX);
 
     let available = available_at(dir).map_err(|source| DownloadError::Io {
         path: dir.display().to_string(),
@@ -969,6 +971,21 @@ mod tests {
     fn an_empty_batch_needs_no_space() {
         let tmp = tempfile::tempdir().expect("temp dir");
         ensure_space(tmp.path(), []).expect("nothing to download always fits");
+    }
+
+    #[test]
+    fn a_total_whose_padding_overflows_clamps_shut_rather_than_wrapping() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        // A total so large that ×1.1 overflows u64. The requirement must clamp to
+        // u64::MAX and refuse — not saturate the multiply and divide back down to
+        // a tenth of it, which a real disk could conceivably satisfy.
+        let err = ensure_space(tmp.path(), [u64::MAX]).expect_err("must refuse");
+        match err {
+            DownloadError::InsufficientSpace { needed, .. } => {
+                assert_eq!(needed, u64::MAX, "the overflowed requirement fails closed");
+            }
+            other => panic!("expected InsufficientSpace, got {other:?}"),
+        }
     }
 
     // ---------------------------------------------------------------------
