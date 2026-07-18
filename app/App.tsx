@@ -10,6 +10,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 
+import { DownloadManager } from "./DownloadManager";
 import {
   bootstrapEngine,
   engineStatus,
@@ -19,6 +20,7 @@ import {
 } from "./lib/engine";
 import { formatBytes } from "./lib/format";
 import { generate, type GenerateProgress } from "./lib/generate";
+import { availableModels } from "./lib/registry";
 
 type View =
   | { phase: "checking" }
@@ -82,6 +84,12 @@ export default function App() {
       <p className="text-sm text-neutral-400">Generate images and video on your own GPU.</p>
 
       <Engine view={view} onInstall={() => void install()} />
+
+      {/* The download manager (#21): once the engine is present, models can be
+          installed from a clean state without a terminal. The real picker with
+          VRAM gating and a license gate is #27; this lists the available models
+          and installs them, which is what #21's done-criterion asks for. */}
+      {view.phase === "idle" && view.status.state === "ready" && <Models />}
 
       {/* The gate (#11): once the engine is installed, one prompt, one image.
           Deliberately spare — #31 is the visual pass, M1 makes models data.
@@ -181,6 +189,25 @@ function GenProgress({ progress }: { progress: GenerateProgress | null }) {
         step {progress.value} of {progress.max}
       </p>
     </div>
+  );
+}
+
+/**
+ * The installable models (#21). Lists what the bundle offers and hands each to a
+ * {@link DownloadManager}. Deliberately flat — no VRAM gating or license gate
+ * here; that is the model picker (#27), which reads the engine's real VRAM and
+ * disables what won't fit (#20). This exists so a model can be installed at all.
+ */
+function Models() {
+  const models = availableModels();
+  if (models.length === 0) return null;
+  return (
+    <section className="mt-6 flex w-full max-w-md flex-col gap-3">
+      <h2 className="text-sm font-semibold text-neutral-300">Models</h2>
+      {models.map((manifest) => (
+        <DownloadManager key={manifest.id} manifest={manifest} />
+      ))}
+    </section>
   );
 }
 

@@ -7,6 +7,7 @@ use crate::paths::Paths;
 
 pub mod commands;
 pub mod download;
+pub mod downloads;
 pub mod engine;
 pub mod paths;
 pub mod sidecar;
@@ -116,6 +117,7 @@ pub fn run() {
         .on_menu_event(handle_menu_event)
         .manage(commands::Bootstrapping::default())
         .manage(commands::RunningEngine::default())
+        .manage(commands::Downloads::default())
         .setup(|app| {
             // Before this session can spawn its own engine, clear one a
             // hard-killed previous run left holding the GPU (§8.3).
@@ -125,7 +127,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::engine_status,
             commands::bootstrap_engine,
-            commands::start_engine
+            commands::start_engine,
+            commands::download_model,
+            commands::cancel_download,
+            commands::model_status
         ])
         .build(tauri::generate_context!());
 
