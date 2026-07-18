@@ -1,0 +1,60 @@
+{
+  "5": {
+    "class_type": "EmptyFlux2LatentImage",
+    "inputs": { "width": 1024, "height": 1024, "batch_size": 1 }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": "PROMPT", "clip": ["11", 0] }
+  },
+  "7": {
+    "class_type": "ConditioningZeroOut",
+    "inputs": { "conditioning": ["6", 0] }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": { "samples": ["24", 0], "vae": ["12", 0] }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": { "filename_prefix": "darkroom", "images": ["8", 0] }
+  },
+  "10": {
+    "class_type": "UNETLoader",
+    "inputs": { "unet_name": "flux-2-klein-4b.safetensors", "weight_dtype": "default" }
+  },
+  "11": {
+    "class_type": "CLIPLoader",
+    "inputs": { "clip_name": "qwen_3_4b.safetensors", "type": "flux2" }
+  },
+  "12": {
+    "class_type": "VAELoader",
+    "inputs": { "vae_name": "flux2-vae.safetensors" }
+  },
+  "20": {
+    "class_type": "Flux2Scheduler",
+    "inputs": { "steps": 4, "width": 1024, "height": 1024 }
+  },
+  "21": {
+    "class_type": "KSamplerSelect",
+    "inputs": { "sampler_name": "euler" }
+  },
+  "22": {
+    "class_type": "RandomNoise",
+    "inputs": { "noise_seed": 42 }
+  },
+  "23": {
+    "class_type": "CFGGuider",
+    "inputs": { "model": ["10", 0], "positive": ["6", 0], "negative": ["7", 0], "cfg": 1 }
+  },
+  "24": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "noise": ["22", 0],
+      "guider": ["23", 0],
+      "sampler": ["21", 0],
+      "sigmas": ["20", 0],
+      "latent_image": ["5", 0]
+    }
+  }
+}
