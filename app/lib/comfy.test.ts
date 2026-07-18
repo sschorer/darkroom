@@ -5,6 +5,7 @@ import {
   outputsFromHistory,
   parseMessage,
   PromptRejected,
+  vramTotalFromStats,
   type EngineEvent,
 } from "./comfy";
 
@@ -274,6 +275,71 @@ describe("ComfyClient", () => {
     expect(parsed.searchParams.get("filename")).toBe("a b&c.png");
     expect(parsed.searchParams.get("subfolder")).toBe("sub dir");
     expect(parsed.searchParams.get("type")).toBe("output");
+  });
+
+  it("reads VRAM back from /system_stats", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          devices: [{ name: "cuda:0", type: "cuda", vram_total: 25_757_220_864 }],
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ComfyClient(51234);
+    const vram = await client.systemStats();
+
+    expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1:51234/system_stats");
+    expect(vram).toBe(25_757_220_864);
+  });
+
+  it("throws an actionable error when /system_stats is not ok", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 500 })));
+
+    const client = new ComfyClient(51234);
+    await expect(client.systemStats()).rejects.toThrow(/HTTP 500/);
+  });
+});
+
+describe("vramTotalFromStats", () => {
+  it("returns the GPU's vram_total in bytes", () => {
+    expect(vramTotalFromStats({ devices: [{ type: "cuda", vram_total: 25_757_220_864 }] })).toBe(
+      25_757_220_864,
+    );
+  });
+
+  it("skips the cpu device, whose vram_total is really system RAM", () => {
+    // A GPU-less box reports a single cpu device carrying the machine's RAM as
+    // vram_total; counting it would wave every model through — the OOM gating
+    // exists to prevent.
+    expect(
+      vramTotalFromStats({ devices: [{ type: "cpu", vram_total: 64_000_000_000 }] }),
+    ).toBeNull();
+  });
+
+  it("takes the largest GPU when several are present", () => {
+    expect(
+      vramTotalFromStats({
+        devices: [
+          { type: "cuda", vram_total: 8_000_000_000 },
+          { type: "cuda", vram_total: 24_000_000_000 },
+        ],
+      }),
+    ).toBe(24_000_000_000);
+  });
+
+  it("returns null for a stats body with no devices array", () => {
+    expect(vramTotalFromStats({})).toBeNull();
+    expect(vramTotalFromStats(null)).toBeNull();
+    expect(vramTotalFromStats({ devices: "nope" })).toBeNull();
+  });
+
+  it("ignores a device missing or misreporting vram_total", () => {
+    expect(
+      vramTotalFromStats({ devices: [{ type: "cuda" }, { type: "cuda", vram_total: "lots" }] }),
+    ).toBeNull();
   });
 });
 

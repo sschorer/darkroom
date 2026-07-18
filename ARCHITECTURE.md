@@ -416,7 +416,7 @@ Anything less leaves a zombie holding the GPU, and the next launch fails with an
 
 ### 8.5 Resource Gating
 
-Read `vram_total` from `/system_stats` at boot. Compare against `requires.vram_gb`. Disable — don't hide — models that don't fit, with the reason shown. Check free disk against `sum(files.size) * 1.1` *before* a download starts.
+Read `vram_total` from `/system_stats` and compare against `requires.vram_gb`. The read is the frontend's (ADR-008: `ComfyClient.systemStats`; the sidecar hits the same endpoint only as a health probe), the comparison is `gate.ts`. Disable — don't hide — models that don't fit, with the reason shown. The reported total is rounded to the nearest whole GiB before comparing: a "24GB" card reports ~23.99 GiB (torch/driver reserve a sliver), so a strict byte comparison would gate a `vram_gb: 24` model off the exact card it was `tested_on`; rounding recovers the nominal size the manifest is authored against, which is also the number the user recognises. No GPU reported (`null`) is "cannot gate", not "gate everything" — the unsupported-hardware story is the accelerator warning's (TD-2), not a fabricated per-model VRAM reason. Check free disk against `sum(files.size) * 1.1` *before* a download starts.
 
 ### 8.6 Error Handling
 
