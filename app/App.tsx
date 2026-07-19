@@ -178,6 +178,13 @@ function StudioMain({ accelerator }: { accelerator: Accelerator }) {
     void loadChoices();
   }, [loadChoices]);
 
+  // A stable handler for the install list: an inline arrow would change identity
+  // every render (prompt keystrokes and progress ticks re-render StudioMain),
+  // and DownloadManager's refresh effect keys on it — so an unstable one re-walks
+  // every model's status on disk on every render. `loadChoices` already ignores
+  // the passed status; we just re-resolve.
+  const refreshChoices = useCallback(() => void loadChoices(), [loadChoices]);
+
   // Opening the menu is the first thing that genuinely needs the engine (for the
   // VRAM read behind the gating reasons), so it's deferred to here rather than
   // spawned on mount. Best-effort: if the read fails the models stay selectable
@@ -236,7 +243,7 @@ function StudioMain({ accelerator }: { accelerator: Accelerator }) {
         {/* The install list (#21): until the Settings model manager (#30), this
             is how a model's weights get onto disk. The compose bar selects among
             what's installed here. */}
-        <Models onStatusChange={() => void loadChoices()} />
+        <Models onStatusChange={refreshChoices} />
 
         {gen.phase === "generating" && <GenProgress progress={gen.progress} />}
 
