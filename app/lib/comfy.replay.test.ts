@@ -24,7 +24,7 @@ import { MockEngine, type Fixture } from "./comfy.mock";
 // startEngine crosses IPC to Rust; here it just hands back a port.
 vi.mock("./engine", () => ({ startEngine: vi.fn(async () => 8188) }));
 
-import { generate } from "./generate";
+import { generate, GenerationFailed } from "./generate";
 
 import successFixture from "./__fixtures__/comfy/session-success.json";
 import rejectedFixture from "./__fixtures__/comfy/session-rejected.json";
@@ -120,23 +120,31 @@ describe("replaying a recorded session end to end through generate", () => {
     expect(onProgress).toHaveBeenLastCalledWith({ value: 4, max: 4 });
   });
 
-  it("rejects with the failing node's name on a recorded 400 + node_errors", async () => {
+  it("rejects with the failing node structured on a recorded 400 + node_errors", async () => {
     replay(rejected);
     stubObjectUrl();
 
-    const err = (await generate("a darkroom", vi.fn()).catch((e: unknown) => e)) as Error;
-    // §8.6: the user gets the node and the reason, never a bare status.
-    expect(err.message).toMatch(/UNETLoader/);
-    expect(err.message).toMatch(/Value not in list/);
+    const err = (await generate("a darkroom", vi.fn()).catch(
+      (e: unknown) => e,
+    )) as GenerationFailed;
+    // §8.6: the user gets the node and the reason, never a bare status. The
+    // banner and failed tile render these as separate fields, so they arrive
+    // structured (#29) rather than concatenated into the message.
+    expect(err).toBeInstanceOf(GenerationFailed);
+    expect(err.failure.nodeType).toBe("UNETLoader");
+    expect(err.failure.message).toMatch(/Value not in list/);
   });
 
   it("rejects with the node type and reason on a recorded execution_error", async () => {
     replay(errored);
     stubObjectUrl();
 
-    const err = (await generate("a darkroom", vi.fn()).catch((e: unknown) => e)) as Error;
-    expect(err.message).toMatch(/KSampler/);
-    expect(err.message).toMatch(/out of memory/i);
+    const err = (await generate("a darkroom", vi.fn()).catch(
+      (e: unknown) => e,
+    )) as GenerationFailed;
+    expect(err).toBeInstanceOf(GenerationFailed);
+    expect(err.failure.nodeType).toBe("KSampler");
+    expect(err.failure.message).toMatch(/out of memory/i);
   });
 });
 

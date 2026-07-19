@@ -18,7 +18,13 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { GenerationCancelled, runGeneration, type GenerateProgress } from "./generate";
+import {
+  GenerationCancelled,
+  GenerationFailed,
+  runGeneration,
+  type GenerateProgress,
+  type GenerationFailure,
+} from "./generate";
 import type { Manifest } from "./registry.schema";
 import { workflowFor } from "./registry";
 import { buildWorkflow, type ParamValues } from "./workflow";
@@ -26,13 +32,14 @@ import { buildWorkflow, type ParamValues } from "./workflow";
 /** A job's lifecycle. `queued` waits its turn; `generating` is the one in-flight
  *  slot (its `progress` null until the first sampling step); `done` holds the
  *  finished image's `blob:` URL and how long the run took (the preview's `6.2s`
- *  recipe chip, #28); `failed` keeps the run's reason. A cancelled job leaves the
- *  list entirely rather than reaching a state here. */
+ *  recipe chip, #28); `failed` keeps the run's structured reason — the node that
+ *  threw and why — which the error banner and failed tile render (#29). A
+ *  cancelled job leaves the list entirely rather than reaching a state here. */
 export type JobStatus =
   | { phase: "queued" }
   | { phase: "generating"; progress: GenerateProgress | null }
   | { phase: "done"; imageUrl: string; elapsedMs: number }
-  | { phase: "failed"; error: string };
+  | { phase: "failed"; error: GenerationFailure };
 
 /** One entry in the queue: the model, the prompt, the resolved param `values`,
  *  and its live status. The model's untouched workflow is loaded and patched
@@ -73,6 +80,10 @@ export interface Queue {
   jobs: Job[];
   enqueue: (request: QueueRequest) => void;
   cancel: (id: string) => void;
+  /** Re-runs a failed job: drops its failed tile and queues the same request
+   *  afresh. The "↻ retry" on the failed tile and the banner's "generate again"
+   *  (#29). A no-op on a job that isn't failed. */
+  retry: (id: string) => void;
   summary: QueueSummary;
 }
 
@@ -154,7 +165,20 @@ export function useQueue(): Queue {
           // run the user called off.
           setJobs((js) => js.filter((job) => job.id !== next.id));
         } else {
-          setStatus(next.id, { phase: "failed", error: String(error) });
+          // runGeneration settles a real failure as a structured GenerationFailed;
+          // anything else reaching here (a buildWorkflow throw before the run, an
+          // engine that never spawned) has no node to blame, so it becomes a
+          // transport-level failure carrying just its message (§8.6).
+          const failure: GenerationFailure =
+            error instanceof GenerationFailed
+              ? error.failure
+              : {
+                  nodeType: null,
+                  nodeId: null,
+                  promptId: null,
+                  message: error instanceof Error ? error.message : String(error),
+                };
+          setStatus(next.id, { phase: "failed", error: failure });
         }
       } finally {
         // Free the slot *after* the settling setJobs above: that state change is
@@ -180,6 +204,24 @@ export function useQueue(): Queue {
 
   const enqueue = useCallback((request: QueueRequest) => {
     setJobs((js) => [...js, { id: crypto.randomUUID(), status: { phase: "queued" }, ...request }]);
+  }, []);
+
+  const retry = useCallback((id: string) => {
+    // Replace the failed tile with a fresh queued job (a new id, so the pump and
+    // the preview treat it as the new run it is) built from the same request. The
+    // pump picks it up on the next `jobs` change like any enqueue.
+    setJobs((js) => {
+      const job = js.find((j) => j.id === id);
+      if (!job || job.status.phase !== "failed") return js;
+      const fresh: Job = {
+        id: crypto.randomUUID(),
+        manifest: job.manifest,
+        prompt: job.prompt,
+        values: job.values,
+        status: { phase: "queued" },
+      };
+      return [...js.filter((j) => j.id !== id), fresh];
+    });
   }, []);
 
   const cancel = useCallback((id: string) => {
@@ -210,5 +252,5 @@ export function useQueue(): Queue {
     };
   }, [jobs]);
 
-  return { jobs, enqueue, cancel, summary };
+  return { jobs, enqueue, cancel, retry, summary };
 }
