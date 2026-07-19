@@ -32,7 +32,8 @@ import {
   type EngineStatus,
 } from "./lib/engine";
 import { formatBytes } from "./lib/format";
-import { useQueue, type Queue } from "./lib/queue";
+import { recipeState, type ParamState } from "./lib/params";
+import { useQueue, type Job, type Queue } from "./lib/queue";
 import type { ParamValues } from "./lib/workflow";
 import { applyGate, readVram, resolveInstalled, type ModelChoice } from "./lib/models";
 import { availableModels } from "./lib/registry";
@@ -186,6 +187,17 @@ function StudioMain({ accelerator, queue }: { accelerator: Accelerator; queue: Q
   const [vram, setVram] = useState<{ bytes: number | null } | null>(null);
   const [prompt, setPrompt] = useState("a photo of a cat wearing a tiny hat, studio lighting");
 
+  // The gallery's preview selection and the "kept" set (#28). Selection is a job
+  // id, resolved to a done job by the {@link Gallery}; `kept` is a visual mark
+  // for now (persistence is the library's, later). `recipe` is the param state
+  // the compose bar opens on when a recipe is reused — applied by bumping
+  // `recipeKey`, which remounts the bar so the model, prompt, and params all land
+  // together (see {@link ComposeBar} `initialParams`).
+  const [selectedOutputId, setSelectedOutputId] = useState<string | null>(null);
+  const [kept, setKept] = useState<ReadonlySet<string>>(() => new Set());
+  const [recipe, setRecipe] = useState<ParamState | null>(null);
+  const [recipeKey, setRecipeKey] = useState(0);
+
   // Re-resolve the offered models' install state (mount, and whenever a download
   // settles). Re-applies the VRAM gate if it's already known, so a model that
   // finished installing keeps its verdict. The default selection is the first
@@ -229,6 +241,40 @@ function StudioMain({ accelerator, queue }: { accelerator: Accelerator; queue: Q
     })();
   }, [vram]);
 
+  // Keep the preview pointed at the newest finished output, unless the user has
+  // one still-valid tile selected — a new completion never steals a manual pick.
+  // Runs on every queue change: a completion, or a cancel that removes the
+  // previewed job, re-resolves the selection.
+  const jobs = queue.jobs;
+  useEffect(() => {
+    setSelectedOutputId((current) => {
+      const done = jobs.filter((job) => job.status.phase === "done");
+      if (current && done.some((job) => job.id === current)) return current;
+      return done.at(-1)?.id ?? null;
+    });
+  }, [jobs]);
+
+  const toggleKeep = useCallback((id: string) => {
+    setKept((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  // Reuse recipe (#28): send a finished job's model, prompt, and exact params
+  // back to the compose bar. Selecting the model and setting the prompt is
+  // parent state; the params reach the bar as its `initialParams`, applied by
+  // bumping `recipeKey` so the bar remounts on the whole recipe at once rather
+  // than racing its own per-model reset.
+  const reuse = useCallback((job: Job) => {
+    setSelectedId(job.manifest.id);
+    setPrompt(job.prompt);
+    setRecipe(recipeState(job.values));
+    setRecipeKey((key) => key + 1);
+  }, []);
+
   const selected = choices?.find((c) => c.manifest.id === selectedId) ?? null;
 
   // Generate enqueues a job from the selected model, the prompt, and the bar's
@@ -245,27 +291,35 @@ function StudioMain({ accelerator, queue }: { accelerator: Accelerator; queue: Q
     [queue, selected, prompt],
   );
 
-  // Real per-model, per-param submission now (buildWorkflow, not the skeleton),
-  // so any installed *image* model on CUDA can generate. Video is gated out
-  // until the grid can render a clip (#15/#28); non-CUDA is unusably slow (Q5,
-  // TD-2). The bar never blocks on a run — sequencing is the queue's job, so it
-  // can keep queuing (`busy` stays false); the rail and grid show the activity.
-  const canGenerate =
-    accelerator === "cuda" && !!selected?.installed && selected.manifest.kind === "image";
+  // Real per-model, per-param submission (buildWorkflow, not the skeleton), so
+  // any installed model on CUDA can generate — image or video, now that the grid
+  // renders a clip (#28). Non-CUDA is unusably slow (Q5, TD-2). The bar never
+  // blocks on a run — sequencing is the queue's job, so it can keep queuing
+  // (`busy` stays false); the rail and grid show the activity.
+  const canGenerate = accelerator === "cuda" && !!selected?.installed;
 
   return (
     <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
-      <div className="flex flex-1 flex-col items-center gap-6 overflow-auto p-8 pb-[120px]">
-        {/* The install list (#21): until the Settings model manager (#30), this
-            is how a model's weights get onto disk. The compose bar selects among
-            what's installed here. */}
-        <Models onStatusChange={refreshChoices} />
-
-        {/* The output grid with the live-generating tile (#27). */}
-        <Gallery jobs={queue.jobs} onCancel={queue.cancel} />
+      {/* The gallery region (#28): the selected-preview column beside the output
+          grid, laid out to the mockup's padding with the compose bar floating
+          over its bottom. The install list (#21) is the grid's empty state —
+          how a model's weights get onto disk until the Settings model manager
+          (#30) owns it. */}
+      <div className="flex min-h-0 flex-1 overflow-hidden pt-[20px] pb-[132px] px-[22px]">
+        <Gallery
+          jobs={queue.jobs}
+          selectedId={selectedOutputId}
+          onSelect={setSelectedOutputId}
+          onCancel={queue.cancel}
+          onReuse={reuse}
+          kept={kept}
+          onToggleKeep={toggleKeep}
+          emptyState={<Models onStatusChange={refreshChoices} />}
+        />
       </div>
 
       <ComposeBar
+        key={recipeKey}
         choices={choices ?? []}
         selected={selected?.manifest ?? null}
         onSelect={(manifest) => setSelectedId(manifest.id)}
@@ -276,6 +330,7 @@ function StudioMain({ accelerator, queue }: { accelerator: Accelerator; queue: Q
         onGenerate={enqueue}
         busy={false}
         canGenerate={canGenerate}
+        initialParams={recipe ?? undefined}
       />
     </main>
   );
