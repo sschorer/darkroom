@@ -164,6 +164,24 @@ export class ComfyClient {
   }
 
   /**
+   * Interrupts whatever prompt is running right now: `POST /interrupt`, no body.
+   * ComfyUI cancels the in-flight sampling and emits `execution_interrupted`,
+   * then drains the queue — so the caller's socket sees the run stop of its own
+   * accord (the `executing {node:null}` idle) rather than a hang.
+   *
+   * The endpoint targets the *engine's* current job, not a `prompt_id`: on our
+   * loopback engine (ADR-007) the sequential queue (#27) only ever has one
+   * prompt in flight, so "the running one" is unambiguous. A non-2xx throws —
+   * cancel that silently fails leaves a tile stuck generating with no way out.
+   */
+  async interrupt(): Promise<void> {
+    const res = await fetch(`${this.httpBase}/interrupt`, { method: "POST" });
+    if (!res.ok) {
+      throw new Error(`could not interrupt the engine: HTTP ${res.status}`);
+    }
+  }
+
+  /**
    * Opens the progress socket, reading this client's id as the `clientId` query
    * param. Parsed events go to `handlers.onEvent`; binary preview frames and
    * unmodelled messages never reach it (see {@link parseMessage}).

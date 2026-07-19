@@ -301,6 +301,25 @@ describe("ComfyClient", () => {
     const client = new ComfyClient(51234);
     await expect(client.systemStats()).rejects.toThrow(/HTTP 500/);
   });
+
+  it("POSTs /interrupt to cancel the running prompt", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ComfyClient(51234);
+    await client.interrupt();
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("http://127.0.0.1:51234/interrupt");
+    expect((init as RequestInit).method).toBe("POST");
+  });
+
+  it("throws when /interrupt is not ok, so a failed cancel is not silent", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 500 })));
+
+    const client = new ComfyClient(51234);
+    await expect(client.interrupt()).rejects.toThrow(/HTTP 500/);
+  });
 });
 
 describe("vramTotalFromStats", () => {

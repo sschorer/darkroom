@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // startEngine crosses IPC to Rust; here it just hands back a port.
 vi.mock("./engine", () => ({ startEngine: vi.fn(async () => 8188) }));
 
-import { generate } from "./generate";
+import { generate, GenerationCancelled, runGeneration } from "./generate";
 
 /** A WebSocket stand-in the test drives by hand. */
 class FakeWebSocket {
@@ -86,6 +86,7 @@ beforeEach(() => {
     }
     if (url.includes("/view"))
       return { ok: true, status: 200, blob: async () => new Blob(["x"]) } as Response;
+    if (url.includes("/interrupt")) return { ok: true, status: 200 } as Response;
     throw new Error(`unexpected fetch: ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -197,5 +198,38 @@ describe("generate", () => {
     socket().error(); // the WebSocket raised its error event instead of opening
 
     await expect(p).rejects.toThrow(/could not open the progress socket/);
+  });
+});
+
+describe("runGeneration cancellation", () => {
+  it("interrupts the engine and settles as GenerationCancelled when the signal aborts", async () => {
+    const controller = new AbortController();
+    const p = runGeneration({}, { onProgress: vi.fn(), signal: controller.signal });
+    await flush();
+    socket().open();
+    await flush(); // submit() resolves: a prompt is now genuinely in flight
+    socket().send({ type: "progress", data: { value: 1, max: 4, prompt_id: "P1" } });
+
+    controller.abort();
+
+    await expect(p).rejects.toBeInstanceOf(GenerationCancelled);
+    // Cancel is a real interrupt to the engine, not just a dropped promise.
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/interrupt"),
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("throws GenerationCancelled without submitting for an already-aborted signal", async () => {
+    // No `flush()` before the assertion: `expect(p).rejects` must attach its
+    // handler before the (imminent) rejection lands, or it reads as unhandled.
+    const p = runGeneration({}, { onProgress: vi.fn(), signal: AbortSignal.abort() });
+
+    await expect(p).rejects.toBeInstanceOf(GenerationCancelled);
+    // Nothing was ever queued — the guard fires before submit.
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining("/prompt"),
+      expect.anything(),
+    );
   });
 });

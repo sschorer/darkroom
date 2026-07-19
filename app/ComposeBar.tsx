@@ -15,17 +15,24 @@
  * are dropped when the model changes because the new bounds make them
  * meaningless.
  *
- * The values these chips hold feed `buildWorkflow()` at submit time — that
- * per-model, per-param queued submission is the queue's (#27); until then the
- * parent wires Generate to the walking-skeleton path (#11) so the bar still
- * makes pixels, and {@link resolveValues} is the seam the queue will read.
+ * The values these chips hold feed `buildWorkflow()` at submit time: Generate
+ * resolves the live params to a {@link resolveValues} map and hands it up, and
+ * the parent enqueues it as a job (#27) that `buildWorkflow` patches per model,
+ * per param. The bar owns the form; the queue owns the run.
  */
 import { useEffect, useRef, useState } from "react";
 
 import type { Accelerator } from "./lib/engine";
 import type { ModelChoice } from "./lib/models";
-import { fieldsFor, type AspectOption, type Field, type ParamState } from "./lib/params";
+import {
+  fieldsFor,
+  resolveValues,
+  type AspectOption,
+  type Field,
+  type ParamState,
+} from "./lib/params";
 import type { Manifest } from "./lib/registry.schema";
+import type { ParamValues } from "./lib/workflow";
 
 /** The swatch gradient — a warm red radial over near-black, the model's stand-in
  *  glyph until real thumbnails exist. Inline because it's a gradient the mockup
@@ -308,7 +315,10 @@ export interface ComposeBarProps {
   accelerator: Accelerator;
   prompt: string;
   onPromptChange: (prompt: string) => void;
-  onGenerate: () => void;
+  /** Submit: the bar resolves the live params to the {@link ParamValues} map
+   *  `buildWorkflow` patches in (`resolveValues`, the #26 seam) and hands them
+   *  up, so the queue (#27) owns the run while the bar owns the form. */
+  onGenerate: (values: ParamValues) => void;
   /** True while a generation is in flight — Generate becomes "Generating…". */
   busy: boolean;
   /** Whether the selected model can be generated right now (installed, and a
@@ -411,7 +421,7 @@ export function ComposeBar({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (!generateDisabled) onGenerate();
+          if (!generateDisabled && selected) onGenerate(resolveValues(selected, params, prompt));
         }}
         className="flex items-center gap-[10px] rounded-[14px] border border-line-5 bg-[rgba(20,20,24,.9)] p-[11px_12px] shadow-[0_20px_50px_rgba(0,0,0,.5)] backdrop-blur-xl"
       >

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseRegistry, selectAvailable } from "./registry";
+import { availableModels, parseRegistry, selectAvailable, workflowFor } from "./registry";
 import type { Manifest } from "./registry.schema";
 
 /** A minimal manifest the schema accepts, spread-overridable per case. */
@@ -127,5 +127,27 @@ describe("selectAvailable", () => {
       ),
     );
     expect(available).toEqual([]);
+  });
+});
+
+// Unlike the pure functions above, workflowFor reads the *real* bundle globs, so
+// these run against the shipped registry — the same join `buildWorkflow` relies
+// on, proving a manifest and its sibling workflow.json actually meet.
+describe("workflowFor", () => {
+  it("loads a shipped model's sibling workflow, with every param node present", () => {
+    const [model] = availableModels();
+    const workflow = workflowFor(model);
+
+    // A real API-format graph: node ids mapping to { class_type, inputs }.
+    expect(Object.keys(workflow).length).toBeGreaterThan(0);
+    // The ADR-005 join: each param targets a node the loaded workflow has.
+    for (const spec of Object.values(model.params)) {
+      expect(workflow[spec.node]).toBeDefined();
+    }
+    expect(workflow[model.output_node]).toBeDefined();
+  });
+
+  it("throws for a manifest the bundle has no entry for", () => {
+    expect(() => workflowFor(manifest({ id: "not-a-real-model" }))).toThrow(/no registry entry/);
   });
 });

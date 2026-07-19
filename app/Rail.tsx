@@ -1,15 +1,14 @@
 /**
- * The Studio left rail (#53): a 184px column with the output Library, a live
+ * The Studio left rail (#53): a 184px column with the output Library, the live
  * generation Queue block, and the pinned Settings button — reproduced from
  * `docs/Darkroom Studio.dc.html` down to the padding and hex.
  *
- * The Library counts and the Queue block are **static placeholder content** at
- * this stage: there is no gallery, database, or running queue to read from yet.
- * The library filter lands with the gallery (#28) and the live queue with the
- * generation queue (#27); until then these mirror the mockup exactly, which is
- * this issue's acceptance criterion. Only the Settings button is wired — it is
- * the one interactive control the shell owns.
+ * The Queue block is now **live** (#27): it reads the generation queue's {@link
+ * QueueSummary} and shows the running job's step bar and what's waiting behind
+ * it, or nothing when the queue is idle. The Library counts stay static
+ * placeholder content until the gallery gives them something to count (#28).
  */
+import type { QueueSummary } from "./lib/queue";
 
 /** One Library row. Presentational for now — clicking a category to filter the
  * gallery arrives with the gallery itself (#28), so these are not buttons. */
@@ -50,7 +49,55 @@ function RailLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-export function Rail({ onOpenSettings }: { onOpenSettings: () => void }) {
+/**
+ * The live Queue block: the running job's step bar and a line for what's queued
+ * behind it. Renders nothing when the queue is idle — an empty block would be
+ * noise, and the mockup's populated state is what a *busy* rail looks like.
+ */
+function QueueBlock({ summary }: { summary: QueueSummary }) {
+  if (summary.active === 0) return null;
+
+  const { generating, queued } = summary;
+  const progress = generating?.progress ?? null;
+  // The step fraction, and the bar width it drives. Before the first step (a
+  // window that includes the cold engine start) there is no fraction to show, so
+  // the label falls back to a bare "generating" and the bar sits empty.
+  const stepLabel = progress ? `${progress.value}/${progress.max}` : "";
+  const pct = progress && progress.max > 0 ? (progress.value / progress.max) * 100 : 0;
+
+  return (
+    <>
+      <RailLabel>Queue · {summary.active}</RailLabel>
+      {generating && (
+        <div className="rounded-[7px] border border-queue-line bg-queue-bg px-[10px] py-[9px]">
+          <div className="mono flex justify-between text-[11.5px] text-queue-ink">
+            <span>generating</span>
+            <span>{stepLabel}</span>
+          </div>
+          <div className="mt-[7px] h-[3px] overflow-hidden rounded-[2px] bg-queue-track">
+            <div
+              className="h-full bg-safelight transition-[width] duration-200"
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+        </div>
+      )}
+      {queued.count > 0 && (
+        <div className="mono truncate px-[10px] py-[9px] text-[11.5px] text-muted-2">
+          {queued.count} queued{queued.nextPrompt ? ` · ${queued.nextPrompt}…` : ""}
+        </div>
+      )}
+    </>
+  );
+}
+
+export function Rail({
+  onOpenSettings,
+  queue,
+}: {
+  onOpenSettings: () => void;
+  queue: QueueSummary;
+}) {
   return (
     <div className="flex w-[184px] shrink-0 flex-col border-r border-line">
       <div className="flex flex-1 flex-col gap-1.5 overflow-hidden px-[14px] py-[18px]">
@@ -60,22 +107,8 @@ export function Rail({ onOpenSettings }: { onOpenSettings: () => void }) {
         <LibraryRow glyph="▶" label="Video" count={24} />
         <LibraryRow glyph="★" label="Kept" count={17} />
 
-        <div className="mx-2 my-3 h-px bg-line" />
-
-        <RailLabel>Queue · 2</RailLabel>
-        {/* Live generation summary — static until the queue is wired (#27). */}
-        <div className="rounded-[7px] border border-queue-line bg-queue-bg px-[10px] py-[9px]">
-          <div className="mono flex justify-between text-[11.5px] text-queue-ink">
-            <span>generating</span>
-            <span>3/4</span>
-          </div>
-          <div className="mt-[7px] h-[3px] overflow-hidden rounded-[2px] bg-queue-track">
-            <div className="h-full bg-safelight" style={{ width: "74%" }} />
-          </div>
-        </div>
-        <div className="mono px-[10px] py-[9px] text-[11.5px] text-muted-2">
-          1 queued · lighthouse…
-        </div>
+        {queue.active > 0 && <div className="mx-2 my-3 h-px bg-line" />}
+        <QueueBlock summary={queue} />
       </div>
 
       {/* Pinned bottom: the one wired control — opens Settings. */}

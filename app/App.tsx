@@ -18,6 +18,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { ComposeBar } from "./ComposeBar";
 import { DownloadManager } from "./DownloadManager";
+import { Gallery } from "./Gallery";
 import { Rail } from "./Rail";
 import { Settings } from "./Settings";
 import { TitleBar } from "./TitleBar";
@@ -31,7 +32,8 @@ import {
   type EngineStatus,
 } from "./lib/engine";
 import { formatBytes } from "./lib/format";
-import { generate, type GenerateProgress } from "./lib/generate";
+import { useQueue, type Queue } from "./lib/queue";
+import type { ParamValues } from "./lib/workflow";
 import { applyGate, readVram, resolveInstalled, type ModelChoice } from "./lib/models";
 import { availableModels } from "./lib/registry";
 import type { ModelStatus } from "./lib/download";
@@ -113,10 +115,10 @@ export default function App() {
       <TitleBar subtitle={subtitle} />
       {screen === "setup" && <Setup view={view} onInstall={() => void install()} />}
       {screen === "studio" && ready && (
-        <div className="flex min-h-0 flex-1">
-          <Rail onOpenSettings={() => setNav("settings")} />
-          <StudioMain accelerator={ready.installed.accelerator} />
-        </div>
+        <Studio
+          accelerator={ready.installed.accelerator}
+          onOpenSettings={() => setNav("settings")}
+        />
       )}
       {screen === "settings" && <Settings onBack={() => setNav("studio")} />}
     </div>
@@ -139,16 +141,42 @@ function Setup({ view, onInstall }: { view: View; onInstall: () => void }) {
 }
 
 /**
- * The Studio's main region: everything to the right of the rail. Its real
- * content is the gallery + selected preview (#28); until that lands, the
- * install list and the last generated image keep the engine→client→pixels path
- * visible inside the shell. The {@link ComposeBar} (#25) floats over it.
+ * The Studio screen: the rail and the main region, sharing one generation
+ * {@link useQueue}. The queue lives here (not in the main) because the rail's
+ * summary and the grid's live tile are two views of the same jobs — the rail
+ * counts what the grid draws. Leaving the Studio unmounts this, ending any run
+ * in flight (the queue's own cleanup); persisting across that is the library's
+ * job (#28).
+ */
+function Studio({
+  accelerator,
+  onOpenSettings,
+}: {
+  accelerator: Accelerator;
+  onOpenSettings: () => void;
+}) {
+  const queue = useQueue();
+  return (
+    <div className="flex min-h-0 flex-1">
+      <Rail onOpenSettings={onOpenSettings} queue={queue.summary} />
+      <StudioMain accelerator={accelerator} queue={queue} />
+    </div>
+  );
+}
+
+/**
+ * The Studio's main region: everything to the right of the rail — the output
+ * grid ({@link Gallery}, #27) with the {@link ComposeBar} (#25) floating over
+ * it, plus the install list that keeps a model reachable until the Settings
+ * model manager (#30). The selected-preview panel and the persisted library are
+ * #28's; this holds the current session's grid.
  *
  * This component is the orchestrator the bar reports to: it owns the resolved
- * model list, the selection, and the generation run. Selection lives here (not
- * in the bar) because generation needs the chosen model; the bar is the surface.
+ * model list and the selection, and turns a Generate into a queued job.
+ * Selection lives here (not in the bar) because a job needs the chosen model;
+ * the bar is the surface.
  */
-function StudioMain({ accelerator }: { accelerator: Accelerator }) {
+function StudioMain({ accelerator, queue }: { accelerator: Accelerator; queue: Queue }) {
   // The offered models with their install state and — once the menu has been
   // opened — their VRAM verdict. `null` while the first resolve is in flight.
   const [choices, setChoices] = useState<ModelChoice[] | null>(null);
@@ -157,7 +185,6 @@ function StudioMain({ accelerator }: { accelerator: Accelerator }) {
   // not yet read; `{ bytes }` = read (bytes may itself be null for no GPU).
   const [vram, setVram] = useState<{ bytes: number | null } | null>(null);
   const [prompt, setPrompt] = useState("a photo of a cat wearing a tiny hat, studio lighting");
-  const [gen, setGen] = useState<GenState>({ phase: "idle" });
 
   // Re-resolve the offered models' install state (mount, and whenever a download
   // settles). Re-applies the VRAM gate if it's already known, so a model that
@@ -204,61 +231,38 @@ function StudioMain({ accelerator }: { accelerator: Accelerator }) {
 
   const selected = choices?.find((c) => c.manifest.id === selectedId) ?? null;
 
-  // The image is a blob: URL the browser holds until revoked; leaving old ones
-  // unrevoked leaks memory across generations. Revoke on replacement and unmount.
-  const imageUrl = gen.phase === "done" ? gen.imageUrl : null;
-  useEffect(() => {
-    return () => {
-      if (imageUrl) URL.revokeObjectURL(imageUrl);
-    };
-  }, [imageUrl]);
+  // Generate enqueues a job from the selected model, the prompt, and the bar's
+  // resolved params (`resolveValues`, #26). The queue (#27) owns everything from
+  // here — locating the workflow, patching it through buildWorkflow, sampling,
+  // the live tile, and revoking the image — so the bar stays a pure submit and
+  // can keep queuing while a job runs. Blob-URL lifetime moved into the queue
+  // with it, so there is no per-image cleanup left here.
+  const enqueue = useCallback(
+    (values: ParamValues) => {
+      if (!selected) return;
+      queue.enqueue({ manifest: selected.manifest, prompt, values });
+    },
+    [queue, selected, prompt],
+  );
 
-  const runGenerate = useCallback(() => {
-    setGen({ phase: "generating", progress: null });
-    void (async () => {
-      try {
-        const url = await generate(prompt, (p) =>
-          // Ignore progress that arrives after we've left the generating phase.
-          setGen((s) => (s.phase === "generating" ? { phase: "generating", progress: p } : s)),
-        );
-        setGen({ phase: "done", imageUrl: url });
-      } catch (e) {
-        setGen({ phase: "failed", error: String(e) });
-      }
-    })();
-  }, [prompt]);
-
-  // The bar's Generate is wired to the walking-skeleton path (#11), which is
-  // hardcoded to FLUX.2 klein and ignores the params. So it's offered only for
-  // an installed *image* model on CUDA — non-CUDA is unusably slow (Q5, TD-2)
-  // and the skeleton can't render video. Per-model, per-param submission through
-  // `buildWorkflow` is the queue (#27).
-  const busy = gen.phase === "generating";
+  // Real per-model, per-param submission now (buildWorkflow, not the skeleton),
+  // so any installed *image* model on CUDA can generate. Video is gated out
+  // until the grid can render a clip (#15/#28); non-CUDA is unusably slow (Q5,
+  // TD-2). The bar never blocks on a run — sequencing is the queue's job, so it
+  // can keep queuing (`busy` stays false); the rail and grid show the activity.
   const canGenerate =
     accelerator === "cuda" && !!selected?.installed && selected.manifest.kind === "image";
 
   return (
     <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
-      <div className="flex flex-1 flex-col items-center gap-4 overflow-auto p-8 pb-[120px]">
+      <div className="flex flex-1 flex-col items-center gap-6 overflow-auto p-8 pb-[120px]">
         {/* The install list (#21): until the Settings model manager (#30), this
             is how a model's weights get onto disk. The compose bar selects among
             what's installed here. */}
         <Models onStatusChange={refreshChoices} />
 
-        {gen.phase === "generating" && <GenProgress progress={gen.progress} />}
-
-        {gen.phase === "failed" && (
-          <div className="flex w-full max-w-md flex-col items-center gap-3">
-            <pre className="max-h-60 w-full overflow-auto whitespace-pre-wrap rounded bg-neutral-900 p-3 text-left text-xs text-red-300">
-              {gen.error}
-            </pre>
-            <OpenLogsButton />
-          </div>
-        )}
-
-        {gen.phase === "done" && (
-          <img src={gen.imageUrl} alt={prompt} className="w-full max-w-md rounded" />
-        )}
+        {/* The output grid with the live-generating tile (#27). */}
+        <Gallery jobs={queue.jobs} onCancel={queue.cancel} />
       </div>
 
       <ComposeBar
@@ -269,37 +273,11 @@ function StudioMain({ accelerator }: { accelerator: Accelerator }) {
         accelerator={accelerator}
         prompt={prompt}
         onPromptChange={setPrompt}
-        onGenerate={runGenerate}
-        busy={busy}
+        onGenerate={enqueue}
+        busy={false}
         canGenerate={canGenerate}
       />
     </main>
-  );
-}
-
-/** The generation run state: idle, sampling, a finished image, or a failure. */
-type GenState =
-  | { phase: "idle" }
-  // `progress` is null from the click until the first sampling event — a window
-  // that includes a cold engine start (up to 120s), so the label must not imply
-  // sampling has begun.
-  | { phase: "generating"; progress: GenerateProgress | null }
-  | { phase: "done"; imageUrl: string }
-  | { phase: "failed"; error: string };
-
-/** Sampling progress: a byte-less bar once the engine reports steps, a plain
- * line before that (which spans the cold engine start). */
-function GenProgress({ progress }: { progress: GenerateProgress | null }) {
-  if (!progress) {
-    return <Note>Starting the engine and queuing the prompt…</Note>;
-  }
-  return (
-    <div className="flex w-full max-w-md flex-col items-center gap-1">
-      <Bar received={progress.value} total={progress.max} />
-      <p className="text-xs tabular-nums text-neutral-500">
-        step {progress.value} of {progress.max}
-      </p>
-    </div>
   );
 }
 
