@@ -356,15 +356,16 @@ export function ComposeBar({
 
   // A model switch keeps the seed but clears the per-model edits and any open
   // editor — the previous model's steps/size mean nothing under new bounds. The
-  // first render is skipped: mounting is not a switch, and clearing then would
-  // wipe an `initialParams` recipe the bar was just remounted to show.
+  // reset fires only when the model actually *changes*, tracked against the
+  // previous id rather than "have we mounted": a mount is not a switch (clearing
+  // then would wipe an `initialParams` recipe the bar was just remounted to
+  // show), and this stays correct under StrictMode's double-invoked effect,
+  // where a mount-counting guard would reset on the second pass.
   const selectedId = selected?.id ?? null;
-  const mounted = useRef(false);
+  const prevSelectedId = useRef(selectedId);
   useEffect(() => {
-    if (!mounted.current) {
-      mounted.current = true;
-      return;
-    }
+    if (prevSelectedId.current === selectedId) return;
+    prevSelectedId.current = selectedId;
     setParams((p) => ({ seed: p.seed, edits: {} }));
     setOpenChip(null);
   }, [selectedId]);
