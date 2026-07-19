@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // startEngine crosses IPC to Rust; here it just hands back a port.
 vi.mock("./engine", () => ({ startEngine: vi.fn(async () => 8188) }));
 
-import { generate } from "./generate";
+import { generate, GenerationCancelled, runGeneration } from "./generate";
 
 /** A WebSocket stand-in the test drives by hand. */
 class FakeWebSocket {
@@ -86,6 +86,7 @@ beforeEach(() => {
     }
     if (url.includes("/view"))
       return { ok: true, status: 200, blob: async () => new Blob(["x"]) } as Response;
+    if (url.includes("/interrupt")) return { ok: true, status: 200 } as Response;
     throw new Error(`unexpected fetch: ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -197,5 +198,74 @@ describe("generate", () => {
     socket().error(); // the WebSocket raised its error event instead of opening
 
     await expect(p).rejects.toThrow(/could not open the progress socket/);
+  });
+});
+
+describe("runGeneration cancellation", () => {
+  it("interrupts the engine and settles as GenerationCancelled when the signal aborts", async () => {
+    const controller = new AbortController();
+    const p = runGeneration({}, { onProgress: vi.fn(), signal: controller.signal });
+    await flush();
+    socket().open();
+    await flush(); // submit() resolves: a prompt is now genuinely in flight
+    socket().send({ type: "progress", data: { value: 1, max: 4, prompt_id: "P1" } });
+
+    controller.abort();
+
+    await expect(p).rejects.toBeInstanceOf(GenerationCancelled);
+    // Cancel is a real interrupt to the engine, not just a dropped promise.
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/interrupt"),
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("interrupts the queued prompt and cancels when the abort races the /prompt POST", async () => {
+    // Hold /prompt open so the abort lands while submit() is still in flight —
+    // the window where onAbort's interrupt fires before the engine has our
+    // prompt, so the post-submit re-check must interrupt it for real.
+    let releasePrompt!: () => void;
+    const promptInFlight = new Promise<void>((r) => (releasePrompt = r));
+    fetchMock.mockImplementation(async (input: string | URL) => {
+      const url = String(input);
+      if (url.includes("/prompt")) {
+        await promptInFlight;
+        return jsonRes({ prompt_id: "P1" });
+      }
+      if (url.includes("/interrupt")) return { ok: true, status: 200 } as Response;
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const controller = new AbortController();
+    const p = runGeneration({}, { onProgress: vi.fn(), signal: controller.signal });
+    await flush();
+    socket().open();
+    await flush(); // now blocked at `await client.submit(workflow)`
+
+    controller.abort(); // aborts while /prompt is still pending
+    releasePrompt(); // submit() resolves: the post-submit guard interrupts + cancels
+
+    await expect(p).rejects.toBeInstanceOf(GenerationCancelled);
+    // Two interrupts, not one: onAbort's (which raced ahead of the prompt and
+    // missed) and the post-submit re-interrupt that actually stops the accepted
+    // prompt. Asserting *both* is what fails if the re-interrupt guard is
+    // removed — a single-interrupt assertion would still match onAbort's call.
+    const interruptCalls = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes("/interrupt"),
+    );
+    expect(interruptCalls).toHaveLength(2);
+  });
+
+  it("throws GenerationCancelled without submitting for an already-aborted signal", async () => {
+    // No `flush()` before the assertion: `expect(p).rejects` must attach its
+    // handler before the (imminent) rejection lands, or it reads as unhandled.
+    const p = runGeneration({}, { onProgress: vi.fn(), signal: AbortSignal.abort() });
+
+    await expect(p).rejects.toBeInstanceOf(GenerationCancelled);
+    // Nothing was ever queued — the guard fires before submit.
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining("/prompt"),
+      expect.anything(),
+    );
   });
 });

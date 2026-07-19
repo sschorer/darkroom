@@ -7,14 +7,15 @@
  * a manifest CI accepts is a manifest the app can read, and neither can drift
  * from the other.
  *
- * VRAM gating and workflow resolution are deliberately *not* here — gating lives
- * in `gate.ts` (#20), which compares this registry's models against the engine's
- * real `/system_stats` VRAM (§8.5, Q5), and locating each model's `workflow.json`
- * is `buildWorkflow`'s job (#16). This module does the one thing #12 asks for:
- * turn the bundled manifests into validated {@link Manifest} values the rest of
- * the app can build on.
+ * VRAM gating is deliberately *not* here — it lives in `gate.ts` (#20), which
+ * compares this registry's models against the engine's real `/system_stats`
+ * VRAM (§8.5, Q5). Locating and patching a model's workflow *is* split: this
+ * module loads the untouched `workflow.json` off the bundle ({@link
+ * workflowFor}), and `buildWorkflow` (#16) patches the user's params into it.
+ * This module does the one thing #12 asks for: turn the bundled manifests — and
+ * their sibling workflows — into validated values the rest of the app builds on.
  */
-import { Manifest } from "./registry.schema";
+import { Manifest, Workflow } from "./registry.schema";
 
 /**
  * Every `manifest.json` under `registry/`, inlined into the bundle at build
@@ -28,6 +29,20 @@ import { Manifest } from "./registry.schema";
 const manifestModules = import.meta.glob<{ default: unknown }>("../../registry/**/manifest.json", {
   eager: true,
 });
+
+/**
+ * Every non-manifest `.json` under `registry/`, inlined alongside the manifests
+ * so a model's `workflow.json` ships in the bundle (and under the same minisign
+ * signature, §8.4) rather than being fetched at runtime. Keyed by bundle path,
+ * the same keys {@link RegistryEntry.path} uses, so {@link workflowFor} can find
+ * a manifest's sibling workflow by swapping the filename. `manifest.json` itself
+ * is loaded through {@link manifestModules} above; matching only the workflow by
+ * its manifest-declared filename keeps the two from crossing.
+ */
+const workflowModules = import.meta.glob<{ default: unknown }>(
+  ["../../registry/**/*.json", "!../../registry/**/manifest.json"],
+  { eager: true },
+);
 
 /** A parsed manifest and the bundle path it came from. The path is the
  *  structural staging signal (`_staged/`) — kept alongside the manifest so the
@@ -96,4 +111,44 @@ export function loadRegistry(): Manifest[] {
  */
 export function availableModels(): Manifest[] {
   return selectAvailable(parseRegistry(manifestModules));
+}
+
+/**
+ * The untouched API-format workflow for a model, validated against the same
+ * {@link Workflow} schema CI cross-checks the manifest against. `buildWorkflow`
+ * clones and patches this per generation (#16, #27); it is never mutated here.
+ *
+ * The lookup joins on the *bundle directory*, not the manifest `id`: manifest
+ * and workflow are siblings (`registry/<model>/manifest.json` +
+ * `<model>/<manifest.workflow>`), so the manifest's own path plus its declared
+ * `workflow` filename names the file. Two failure modes throw loudly rather than
+ * generating garbage (ADR-005): a manifest whose id we can't find an entry for,
+ * and a `workflow` filename absent from the bundle. In a released build neither
+ * can happen — the registry is bundled and gated by `pnpm test:registry` — so a
+ * throw here is a developer error we want surfaced, not swallowed into an empty
+ * generation.
+ */
+export function workflowFor(manifest: Manifest): Workflow {
+  const entry = parseRegistry(manifestModules).find((e) => e.manifest.id === manifest.id);
+  if (!entry) {
+    throw new Error(`no registry entry found for model "${manifest.id}".`);
+  }
+  const dir = entry.path.slice(0, entry.path.lastIndexOf("/"));
+  const workflowPath = `${dir}/${manifest.workflow}`;
+  const module = workflowModules[workflowPath];
+  if (!module) {
+    throw new Error(
+      `workflow "${manifest.workflow}" for model "${manifest.id}" is not in the bundle ` +
+        `(expected it at ${workflowPath}).`,
+    );
+  }
+  const result = Workflow.safeParse(module.default);
+  if (!result.success) {
+    throw new Error(
+      `workflow ${workflowPath} does not match the schema — this should have been caught ` +
+        `by \`pnpm test:registry\` before it shipped:\n` +
+        JSON.stringify(result.error.format(), null, 2),
+    );
+  }
+  return result.data;
 }

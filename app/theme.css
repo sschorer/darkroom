@@ -133,6 +133,16 @@
   --color-queue-ink: #c7796d; /* "generating 3/4" label */
   --color-queue-track: #241618; /* progress-bar track under the safelight fill */
 
+  /* --- Studio live-generating tile (#27) ---------------------------------- */
+  /* The in-grid tile that shows the running generation before its pixels land.
+     Warmer and brighter than the rail block — it is the focus of the grid, not
+     a summary — with its own hairline and step-bar track. The tile's radial +
+     linear fill and its sweep stay inline in the component (hand-tuned
+     gradients, like the compose-bar swatch). */
+  --color-live-line: #3a242a; /* the generating tile's hairline */
+  --color-live-track: #2a1c18; /* step-bar track under the safelight fill */
+  --color-live-cancel: rgba(12, 12, 15, 0.6); /* cancel ✕ idle bg */
+
   /* --- Window chrome (the custom titlebar, #52 / ADR-019) ------------------ */
   /* Control-local values the mockup uses only here — kept as tokens so the
      palette still has one home rather than leaking hexes into TitleBar.tsx. */
@@ -165,5 +175,18 @@
   }
   50% {
     opacity: 1;
+  }
+}
+
+/* The live-generating tile's sweep (#27). A translucent band travels across the
+   tile so a generation that hasn't reported a step yet still reads as *working*
+   rather than frozen — the same reassurance the engine install's shimmer gives.
+   Named, not inlined, so the tile and the install bar sweep on one clock. */
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(240%);
   }
 }

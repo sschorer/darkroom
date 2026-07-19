@@ -1,13 +1,17 @@
 /**
- * The one generation flow the walking-skeleton gate needs (#11): a prompt in,
- * an image out. Deliberately hardcoded — no registry, no `buildWorkflow`, no
- * queue. Those are M1+; this exists to prove ARCHITECTURE.md's engine/client
- * design carries real pixels end to end, and to surface what hurts doing it.
+ * One generation, end to end: a workflow in, an image out. {@link runGeneration}
+ * is the reusable core — it drives ARCHITECTURE.md's engine/client conversation
+ * (§6.2 `start_engine` for the port, §6.3 the {@link ComfyClient}) for *any*
+ * API-format workflow and reports progress as it samples. The generation queue
+ * (#27) calls it once per job with a `buildWorkflow`-patched graph; {@link
+ * generate} is the thin walking-skeleton wrapper (#11) that feeds it one
+ * hardcoded FLUX.2 klein workflow, kept because the recorded-traffic suites
+ * (ADR-010) drive the whole socket dance through it.
  *
- * It stitches together the three pieces built before it: `start_engine` for the
- * port (§6.2), the {@link ComfyClient} conversation (§6.3), and one hardcoded
- * FLUX.2 klein workflow. The only thing that varies at runtime is the positive
- * prompt, patched into a single node.
+ * Cancellation is an {@link https://developer.mozilla.org/docs/Web/API/AbortSignal
+ * AbortSignal}: aborting it `POST /interrupt`s the engine and settles the run as
+ * {@link GenerationCancelled}, distinct from a failure so the queue can drop the
+ * job rather than mark it errored.
  */
 import { ComfyClient, type EngineEvent, type Workflow } from "./comfy";
 import { startEngine } from "./engine";
@@ -16,7 +20,7 @@ import baseWorkflow from "./flux2-klein.workflow.json";
 /**
  * The node whose `text` carries the positive prompt. Hardcoded to match
  * `flux2-klein.workflow.json`; the real by-role patching is `buildWorkflow`'s
- * job (#16), and a manifest will name this node rather than a constant here.
+ * job (#16), used by the queue rather than this walking-skeleton wrapper.
  */
 const PROMPT_NODE = "6";
 
@@ -24,6 +28,27 @@ const PROMPT_NODE = "6";
 export interface GenerateProgress {
   value: number;
   max: number;
+}
+
+/**
+ * Settled onto by {@link runGeneration} when its {@link AbortSignal} fires. A
+ * *distinct* type, not a plain `Error`, so the caller (#27's queue) can tell a
+ * user-requested cancel apart from a real failure: a cancel drops the tile, a
+ * failure keeps it with its reason. The message is deliberately terse — a cancel
+ * is not something the user needs told back to them.
+ */
+export class GenerationCancelled extends Error {
+  constructor() {
+    super("the generation was cancelled.");
+    this.name = "GenerationCancelled";
+  }
+}
+
+/** What {@link runGeneration} needs beyond the workflow: where to report steps,
+ *  and an optional signal that cancels the run when aborted. */
+export interface RunGenerationOptions {
+  onProgress: (p: GenerateProgress) => void;
+  signal?: AbortSignal;
 }
 
 /**
@@ -39,15 +64,15 @@ export interface GenerateProgress {
  *
  * Rejects with an actionable message: a node that throws in Python surfaces its
  * node type and reason (§8.6), and the engine dying mid-run surfaces as a closed
- * socket rather than a hang.
+ * socket rather than a hang. An aborted `signal` settles it as {@link
+ * GenerationCancelled} instead — the engine is interrupted and the run unwinds.
  */
-export async function generate(
-  prompt: string,
-  onProgress: (p: GenerateProgress) => void,
+export async function runGeneration(
+  workflow: Workflow,
+  { onProgress, signal }: RunGenerationOptions,
 ): Promise<string> {
   const port = await startEngine();
   const client = new ComfyClient(port);
-  const workflow = withPrompt(prompt);
 
   // Our prompt's id, known only once `submit` resolves. The engine can already
   // be emitting events by then (they fire during the POST), so events that
@@ -118,7 +143,23 @@ export async function generate(
     },
   });
 
+  // Cancellation: interrupt the engine (it stops sampling and drains its queue)
+  // and settle the run as cancelled. Registered once the client exists; the
+  // already-aborted case is caught by the guard at the top of the try, since
+  // `addEventListener` never fires for an abort that happened before it. The
+  // interrupt is best-effort — a cancel the engine can't hear still unwinds the
+  // client, and the socket closing in `finally` is the backstop.
+  const onAbort = () => {
+    void client.interrupt().catch(() => {});
+    resolvers.reject(new GenerationCancelled());
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+
   try {
+    if (signal?.aborted) {
+      throw new GenerationCancelled();
+    }
+
     // `opened` rejects with the WebSocket's raw error Event, which carries no
     // readable detail (browsers hide it) and stringifies to "[object Event]".
     // Translate it to something actionable: the engine answered HTTP health or
@@ -136,6 +177,17 @@ export async function generate(
     }
 
     submittedId = await client.submit(workflow);
+    // An abort that raced the /prompt POST fired its interrupt (in `onAbort`)
+    // before the engine had our prompt to interrupt — a no-op that would leave
+    // the engine sampling a run we've abandoned. Now that the prompt is queued,
+    // interrupt it for real and unwind as cancelled, before replaying events or
+    // awaiting a completion we'd only discard. Best-effort interrupt, so a cancel
+    // still settles as GenerationCancelled (the queue's drop-the-tile signal)
+    // rather than as a failure if the interrupt POST itself fails.
+    if (signal?.aborted) {
+      await client.interrupt().catch(() => {});
+      throw new GenerationCancelled();
+    }
     // Replay whatever arrived while the id was unknown, in order. Synchronous,
     // so no live event can interleave between assigning the id and draining.
     for (const event of pending) {
@@ -151,8 +203,22 @@ export async function generate(
     }
     return await fetchAsBlobUrl(client.viewUrl(outputs[0]));
   } finally {
+    signal?.removeEventListener("abort", onAbort);
     socket.close();
   }
+}
+
+/**
+ * The walking-skeleton entry (#11): one hardcoded FLUX.2 klein workflow with the
+ * prompt patched in, run through {@link runGeneration}. The app generates through
+ * the queue (#27) now, so this is exercised only by the recorded-traffic suites
+ * (ADR-010) — the cheapest place the whole socket dance stays under test.
+ */
+export async function generate(
+  prompt: string,
+  onProgress: (p: GenerateProgress) => void,
+): Promise<string> {
+  return runGeneration(withPrompt(prompt), { onProgress });
 }
 
 /** Deep-clones the base workflow and patches the prompt into its one text node. */
