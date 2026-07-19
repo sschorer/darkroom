@@ -246,12 +246,14 @@ describe("runGeneration cancellation", () => {
     releasePrompt(); // submit() resolves: the post-submit guard interrupts + cancels
 
     await expect(p).rejects.toBeInstanceOf(GenerationCancelled);
-    // The engine was told to stop the prompt it did end up accepting, not left
-    // sampling a run we abandoned.
-    expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringContaining("/interrupt"),
-      expect.objectContaining({ method: "POST" }),
+    // Two interrupts, not one: onAbort's (which raced ahead of the prompt and
+    // missed) and the post-submit re-interrupt that actually stops the accepted
+    // prompt. Asserting *both* is what fails if the re-interrupt guard is
+    // removed — a single-interrupt assertion would still match onAbort's call.
+    const interruptCalls = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes("/interrupt"),
     );
+    expect(interruptCalls).toHaveLength(2);
   });
 
   it("throws GenerationCancelled without submitting for an already-aborted signal", async () => {
