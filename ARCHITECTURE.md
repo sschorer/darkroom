@@ -207,7 +207,8 @@ Manifest schema:
 
 ```jsonc
 {
-  "id": "flux2-klein",
+  "id": "flux2-klein",          // stable slug: filenames, workflow lookup
+  "name": "FLUX.2 klein",       // human name shown in the UI (#25, #30)
   "kind": "image",              // image | video
   "enabled": true,
   "license": "Apache-2.0",
