@@ -26,6 +26,7 @@ import type { Accelerator } from "./lib/engine";
 import type { ModelChoice } from "./lib/models";
 import {
   fieldsFor,
+  randomSeed,
   resolveValues,
   type AspectOption,
   type Field,
@@ -40,12 +41,6 @@ import type { ParamValues } from "./lib/workflow";
 const SWATCH =
   "radial-gradient(120% 120% at 30% 20%, rgba(217,79,61,.4), transparent 60%), " +
   "linear-gradient(150deg,#2a1b17,#140d0b)";
-
-/** A fresh 31-bit seed. ComfyUI seeds are non-negative integers; 2³¹ keeps them
- *  well inside a JS-safe range and matches the mockup's ~9-digit value. */
-function randomSeed(): number {
-  return Math.floor(Math.random() * 0x80000000);
-}
 
 /** A field's stable key: its name for numbers, or the kind for the singletons
  *  (there is only ever one seed chip and one aspect chip). Used both as the
@@ -325,6 +320,11 @@ export interface ComposeBarProps {
    *  path exists for it). Drives Generate's enabled state alongside `busy` and a
    *  non-empty prompt. */
   canGenerate: boolean;
+  /** The params to open with, used only as the initial value of the internal
+   *  form state. The parent bumps the bar's `key` when it wants these applied —
+   *  "reuse recipe" (#28) sets the model, prompt, and these together and remounts
+   *  the bar so the whole recipe lands atomically. Absent → a fresh random seed. */
+  initialParams?: ParamState;
 }
 
 export function ComposeBar({
@@ -338,21 +338,33 @@ export function ComposeBar({
   onGenerate,
   busy,
   canGenerate,
+  initialParams,
 }: ComposeBarProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   // The live params form (#26). Seed lives here because it's the one param the
   // bar mutates (shuffle) and it's model-agnostic, so it survives a model
   // switch; `edits` are the numeric overrides, dropped below when the model
-  // changes because the new manifest's bounds make them meaningless.
-  const [params, setParams] = useState<ParamState>(() => ({ seed: randomSeed(), edits: {} }));
+  // changes because the new manifest's bounds make them meaningless. Seeded from
+  // `initialParams` so a reused recipe (#28) opens the bar on the exact values
+  // that made the output (the parent remounts to apply one).
+  const [params, setParams] = useState<ParamState>(
+    () => initialParams ?? { seed: randomSeed(), edits: {} },
+  );
   // Which chip's editing popover is open, by field key, or null for none.
   const [openChip, setOpenChip] = useState<string | null>(null);
   const chipsRef = useRef<HTMLDivElement>(null);
 
   // A model switch keeps the seed but clears the per-model edits and any open
-  // editor — the previous model's steps/size mean nothing under new bounds.
+  // editor — the previous model's steps/size mean nothing under new bounds. The
+  // first render is skipped: mounting is not a switch, and clearing then would
+  // wipe an `initialParams` recipe the bar was just remounted to show.
   const selectedId = selected?.id ?? null;
+  const mounted = useRef(false);
   useEffect(() => {
+    if (!mounted.current) {
+      mounted.current = true;
+      return;
+    }
     setParams((p) => ({ seed: p.seed, edits: {} }));
     setOpenChip(null);
   }, [selectedId]);

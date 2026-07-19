@@ -25,12 +25,13 @@ import { buildWorkflow, type ParamValues } from "./workflow";
 
 /** A job's lifecycle. `queued` waits its turn; `generating` is the one in-flight
  *  slot (its `progress` null until the first sampling step); `done` holds the
- *  finished image's `blob:` URL; `failed` keeps the run's reason. A cancelled
- *  job leaves the list entirely rather than reaching a state here. */
+ *  finished image's `blob:` URL and how long the run took (the preview's `6.2s`
+ *  recipe chip, #28); `failed` keeps the run's reason. A cancelled job leaves the
+ *  list entirely rather than reaching a state here. */
 export type JobStatus =
   | { phase: "queued" }
   | { phase: "generating"; progress: GenerateProgress | null }
-  | { phase: "done"; imageUrl: string }
+  | { phase: "done"; imageUrl: string; elapsedMs: number }
   | { phase: "failed"; error: string };
 
 /** One entry in the queue: the model, the prompt, the resolved param `values`,
@@ -122,6 +123,11 @@ export function useQueue(): Queue {
     abort.current = controller;
     setStatus(next.id, { phase: "generating", progress: null });
 
+    // When sampling began, so the finished job can report its wall-clock time as
+    // the preview's `6.2s` recipe chip (#28). Started here, when the slot is
+    // taken, so it measures the run the user waited on — not the queue wait.
+    const started = Date.now();
+
     void (async () => {
       try {
         // Manifest × workflow meet here, not at submit: a missing workflow or a
@@ -141,7 +147,7 @@ export function useQueue(): Queue {
               ),
             ),
         });
-        setStatus(next.id, { phase: "done", imageUrl });
+        setStatus(next.id, { phase: "done", imageUrl, elapsedMs: Date.now() - started });
       } catch (error) {
         if (error instanceof GenerationCancelled) {
           // A cancel drops the tile entirely — there is nothing to show for a

@@ -33,6 +33,32 @@ export interface ParamState {
 const PROMPT = "prompt";
 const SEED = "seed";
 
+/** A fresh 31-bit seed. ComfyUI seeds are non-negative integers; 2³¹ keeps them
+ *  well inside a JS-safe range and matches the mockup's ~9-digit value. Lives
+ *  here, with the rest of the param semantics, so both the compose bar's initial
+ *  state and a reused recipe draw their seed from one place. */
+export function randomSeed(): number {
+  return Math.floor(Math.random() * 0x80000000);
+}
+
+/**
+ * The {@link ParamState} that reproduces a finished job's recipe (#28's "reuse
+ * recipe"). The seed comes back verbatim; every other numeric value becomes an
+ * `edit`, so the compose bar shows — and re-submits — exactly what made the
+ * output. The prompt is threaded separately (it isn't part of {@link
+ * ParamState}); a value that isn't a number is ignored, leaving that param at
+ * its manifest default.
+ */
+export function recipeState(values: ParamValues): ParamState {
+  const edits: Record<string, number> = {};
+  for (const [name, value] of Object.entries(values)) {
+    if (name === PROMPT || name === SEED) continue;
+    if (typeof value === "number") edits[name] = value;
+  }
+  const seed = values[SEED];
+  return { seed: typeof seed === "number" ? seed : randomSeed(), edits };
+}
+
 /** One editable chip in the bar. A discriminated union so the component renders
  *  the right popover: a seed (value + shuffle), a plain clamped number (steps /
  *  frames), or an aspect picker (image size, chosen from presets). */
