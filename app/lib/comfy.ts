@@ -472,6 +472,29 @@ function tailOf(body: string): string {
 }
 
 /**
+ * The first node in a `node_errors` map, split into its parts — the failing
+ * node's id, its ComfyUI `class_type`, and the first error message. This is what
+ * the error banner and failed tile (#29) render from: node name, "#id", reason.
+ * `null` when the map is empty or unrecognisable, so a caller falls back to a
+ * transport-level message rather than an empty node label. Best-effort over the
+ * same undocumented shape {@link summariseNodeErrors} reads.
+ */
+export function firstNodeError(
+  nodeErrors: Record<string, unknown>,
+): { nodeId: string; nodeType: string | null; message: string } | null {
+  for (const [nodeId, value] of Object.entries(nodeErrors)) {
+    const v = value as { class_type?: unknown; errors?: unknown };
+    const nodeType = typeof v.class_type === "string" ? v.class_type : null;
+    const first = Array.isArray(v.errors)
+      ? (v.errors[0] as { message?: unknown } | undefined)
+      : undefined;
+    const message = typeof first?.message === "string" ? first.message : "invalid input";
+    return { nodeId, nodeType, message };
+  }
+  return null;
+}
+
+/**
  * A one-line "node 6 (KSampler): <first error>" summary of `node_errors`, so the
  * failing node's name reaches the user even from a caller that only reads
  * `.message`. Best-effort over an undocumented shape; an unrecognised entry is

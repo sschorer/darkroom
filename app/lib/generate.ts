@@ -13,7 +13,13 @@
  * {@link GenerationCancelled}, distinct from a failure so the queue can drop the
  * job rather than mark it errored.
  */
-import { ComfyClient, type EngineEvent, type Workflow } from "./comfy";
+import {
+  ComfyClient,
+  firstNodeError,
+  PromptRejected,
+  type EngineEvent,
+  type Workflow,
+} from "./comfy";
 import { startEngine } from "./engine";
 import baseWorkflow from "./flux2-klein.workflow.json";
 
@@ -42,6 +48,65 @@ export class GenerationCancelled extends Error {
     super("the generation was cancelled.");
     this.name = "GenerationCancelled";
   }
+}
+
+/**
+ * A run that failed, decomposed for the error surface (#29). §8.6 says the user
+ * gets *which* node and *why*, never a bare status — so a node throw carries its
+ * `nodeType` ("CLIPTextEncode"), `nodeId` (the "#6"), and `message`, while a
+ * transport failure (the engine dying, a socket that won't open, a workflow that
+ * won't build) leaves the node fields null and keeps just the reason. `promptId`
+ * rides along when the engine had assigned one, for the banner's "prompt_id 7b2f…"
+ * line. `message` is always present — it is the error's own `.message`.
+ */
+export interface GenerationFailure {
+  nodeType: string | null;
+  nodeId: string | null;
+  promptId: string | null;
+  message: string;
+}
+
+/**
+ * Settled onto by {@link runGeneration} for any non-cancel failure. Distinct from
+ * {@link GenerationCancelled} (which the queue drops) so a real failure keeps its
+ * tile with a structured {@link GenerationFailure} the banner and failed tile
+ * render from, rather than a flat string the UI would have to re-parse.
+ */
+export class GenerationFailed extends Error {
+  constructor(readonly failure: GenerationFailure) {
+    super(failure.message);
+    this.name = "GenerationFailed";
+  }
+}
+
+/**
+ * Normalises whatever a run threw into a {@link GenerationFailure}. A
+ * {@link PromptRejected} is unpacked to its first `node_errors` entry (the node
+ * §8.6 wants named); a node's `execution_error` already arrives structured (see
+ * {@link GenerationFailed}); anything else — a dead socket, a failed engine
+ * spawn, a workflow that wouldn't build — is a transport failure with no node to
+ * blame, so its `.message` is kept as-is. `promptId` is threaded through because
+ * the throw site rarely carries it but the run always knows it.
+ */
+function asFailure(error: unknown, promptId: string | null): GenerationFailure {
+  if (error instanceof GenerationFailed) {
+    return error.failure;
+  }
+  if (error instanceof PromptRejected) {
+    const node = firstNodeError(error.nodeErrors);
+    return {
+      nodeType: node?.nodeType ?? null,
+      nodeId: node?.nodeId ?? null,
+      promptId,
+      message: node?.message ?? error.message,
+    };
+  }
+  return {
+    nodeType: null,
+    nodeId: null,
+    promptId,
+    message: error instanceof Error ? error.message : String(error),
+  };
 }
 
 /** What {@link runGeneration} needs beyond the workflow: where to report steps,
@@ -116,8 +181,17 @@ export async function runGeneration(
         }
         break;
       case "error":
+        // A node threw in Python: keep the node type and id structured (the
+        // banner and failed tile render them, §8.6) rather than flattening them
+        // into a string the UI would re-parse. The error event carries our
+        // prompt id; fall back to the one we submitted with.
         resolvers.reject(
-          new Error(`${event.error.nodeType || "the engine"}: ${event.error.message}`),
+          new GenerationFailed({
+            nodeType: event.error.nodeType || null,
+            nodeId: event.error.nodeId || null,
+            promptId: event.promptId ?? submittedId,
+            message: event.error.message,
+          }),
         );
         break;
     }
@@ -202,6 +276,15 @@ export async function runGeneration(
       throw new Error("the engine finished but produced no image.");
     }
     return await fetchAsBlobUrl(client.viewUrl(outputs[0]));
+  } catch (error) {
+    // A cancel is the queue's drop-the-tile signal — pass it through untouched.
+    // Everything else settles as a structured GenerationFailed: a node throw
+    // keeps its node fields, a socket death or a rejected prompt folds into one
+    // (asFailure), so the caller reads a single failure shape (§8.6).
+    if (error instanceof GenerationCancelled) {
+      throw error;
+    }
+    throw new GenerationFailed(asFailure(error, submittedId));
   } finally {
     signal?.removeEventListener("abort", onAbort);
     socket.close();

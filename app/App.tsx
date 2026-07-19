@@ -18,7 +18,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { ComposeBar } from "./ComposeBar";
 import { DownloadManager } from "./DownloadManager";
-import { Gallery } from "./Gallery";
+import { ErrorBanner, Gallery } from "./Gallery";
 import { Rail } from "./Rail";
 import { Settings } from "./Settings";
 import { TitleBar } from "./TitleBar";
@@ -277,6 +277,15 @@ function StudioMain({ accelerator, queue }: { accelerator: Accelerator; queue: Q
 
   const selected = choices?.find((c) => c.manifest.id === selectedId) ?? null;
 
+  // The node-error banner (#29) surfaces the newest failed run until it is
+  // dismissed or the job leaves the list — a retry replaces its tile, a cancel
+  // drops it. Tracking the *dismissed id* rather than a boolean means a later,
+  // different failure re-shows the banner after an earlier one was dismissed,
+  // because it carries a new id.
+  const [dismissedFailureId, setDismissedFailureId] = useState<string | null>(null);
+  const latestFailure = jobs.filter((job) => job.status.phase === "failed").at(-1) ?? null;
+  const bannerJob = latestFailure && latestFailure.id !== dismissedFailureId ? latestFailure : null;
+
   // Generate enqueues a job from the selected model, the prompt, and the bar's
   // resolved params (`resolveValues`, #26). The queue (#27) owns everything from
   // here — locating the workflow, patching it through buildWorkflow, sampling,
@@ -311,12 +320,20 @@ function StudioMain({ accelerator, queue }: { accelerator: Accelerator; queue: Q
           selectedId={selectedOutputId}
           onSelect={setSelectedOutputId}
           onCancel={queue.cancel}
+          onRetry={queue.retry}
           onReuse={reuse}
           kept={kept}
           onToggleKeep={toggleKeep}
           emptyState={<Models onStatusChange={refreshChoices} />}
         />
       </div>
+
+      {bannerJob && bannerJob.status.phase === "failed" && (
+        <ErrorBanner
+          failure={bannerJob.status.error}
+          onDismiss={() => setDismissedFailureId(bannerJob.id)}
+        />
+      )}
 
       <ComposeBar
         key={recipeKey}

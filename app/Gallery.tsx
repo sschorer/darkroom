@@ -16,12 +16,15 @@
  * video tile in the grid carries a `▶ m:ss` badge once its metadata loads.
  *
  * This grid still holds only the current session's jobs; the persisted library
- * behind the rail's counts is later. The failed tile is deliberately minimal —
- * the node-error banner and retry the mockup shows are #29's error-surfacing
- * work; here a failed run is at least visible and dismissable.
+ * behind the rail's counts is later. A failed run shows a {@link FailedTile} with
+ * a retry, and the newest failure raises the {@link ErrorBanner} above the
+ * compose bar — the node-error surfacing (#29) driven by the run's real
+ * {@link GenerationFailure}.
  */
 import { useState } from "react";
 
+import { openLogs } from "./lib/engine";
+import type { GenerationFailure } from "./lib/generate";
 import type { Job } from "./lib/queue";
 
 /** The tile's warm fill and its travelling sweep — hand-tuned gradients the
@@ -33,6 +36,10 @@ const LIVE_FILL =
 const LIVE_SWEEP = "linear-gradient(90deg,transparent,rgba(217,79,61,.16),transparent)";
 const LIVE_BAR = "linear-gradient(90deg,#a83a2c,#d94f3d)";
 const LIVE_OVERLAY = "linear-gradient(0deg,rgba(8,6,6,.85),transparent)";
+
+/** The failed tile's dark red-black fill (#29) — the mockup's `160deg` warm
+ *  near-black, kept inline like the live tile's gradients rather than tokenised. */
+const FAILED_FILL = "linear-gradient(160deg,#1a1210,#100b0a)";
 
 /** The empty preview's tonal fill — the cool slate the mockup's placeholder
  *  frame uses, so the column reads as "a frame goes here" before one is picked. */
@@ -230,20 +237,111 @@ function DoneTile({
   );
 }
 
-/** A run that errored. Minimal on purpose: the node-error banner and the retry
- *  affordance the mockup shows are #29's error-surfacing work; here a failed run
- *  is at least visible and dismissable, its reason on the tile's title, rather
- *  than vanishing. */
-function FailedTile({ job, onCancel }: { job: Job; onCancel: () => void }) {
-  const error = job.status.phase === "failed" ? job.status.error : "";
+/** A run that errored (#29): the ⚠ glyph, "failed", the node that threw, and a
+ *  "↻ retry" that re-runs the same request. The failing node's name (or "engine
+ *  error" when the failure was transport-level, with no node to blame) reads off
+ *  the structured {@link GenerationFailure}; the full reason is on the tile's
+ *  title. The banner above the compose bar ({@link ErrorBanner}) carries the long
+ *  form — this tile is the grid's marker of it. */
+function FailedTile({ job, onRetry }: { job: Job; onRetry: () => void }) {
+  const failure = job.status.phase === "failed" ? job.status.error : null;
   return (
     <div
-      title={error}
-      className="relative flex aspect-square flex-col items-center justify-center gap-[7px] overflow-hidden rounded-[6px] border border-error-line bg-inset"
+      title={failure?.message}
+      className="relative flex aspect-square flex-col items-center justify-center gap-[7px] overflow-hidden rounded-[6px] border border-error-line"
+      style={{ background: FAILED_FILL }}
     >
       <span className="text-[19px] text-error-glyph">⚠</span>
       <span className="mono text-[11px] text-queue-ink">failed</span>
-      <TileCancel onClick={onCancel} title="Dismiss" />
+      <span className="mono text-[9.5px] text-[#7a5a52]">
+        {failure?.nodeType ?? "engine error"}
+      </span>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="mono absolute bottom-[7px] right-[8px] text-[9.5px] text-[#9a8a82] transition-colors hover:text-error-glyph"
+      >
+        ↻ retry
+      </button>
+    </div>
+  );
+}
+
+/** The engine's prompt_id, shortened to the mockup's `7b2f…` — enough to
+ *  correlate a failure with a line in the engine log without spilling a full
+ *  UUID across the banner. `null` when the run failed before the engine assigned
+ *  one (a spawn failure, a socket that never opened). */
+function shortPromptId(promptId: string | null): string | null {
+  return promptId ? `${promptId.slice(0, 4)}…` : null;
+}
+
+/**
+ * The node-error banner (#29): the long form of a failure, floating above the
+ * compose bar. Where the failed tile is the grid's marker, this is the sentence —
+ * the failing node named (`CLIPTextEncode` (#6)) and its reason, the prompt_id to
+ * find it in the log, a **View engine log** route to the traceback (ADR-015,
+ * §8.6), and a dismiss. Driven entirely by the run's real {@link
+ * GenerationFailure}: a transport-level failure with no node to blame drops the
+ * "node …" clause and reads as "Generation failed — <reason>".
+ *
+ * Positioned here (absolute, `bottom 94px`) rather than by the caller so the
+ * banner owns its place in the mockup; it renders inside the Studio main's
+ * `relative` surface, tucked over the compose bar (`bottom 22px`).
+ */
+export function ErrorBanner({
+  failure,
+  onDismiss,
+}: {
+  failure: GenerationFailure;
+  onDismiss: () => void;
+}) {
+  const promptId = shortPromptId(failure.promptId);
+  const hint = "check the engine log, then generate again";
+  return (
+    <div
+      className="absolute inset-x-[22px] bottom-[94px] flex items-center gap-[13px] rounded-[12px] border border-error-line px-[14px] py-[12px] shadow-[0_16px_40px_rgba(0,0,0,.5)] backdrop-blur-[12px]"
+      style={{ background: "var(--color-error-surface)" }}
+    >
+      <span className="inline-flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-[7px] bg-[#2a1513] text-[14px] text-error-glyph">
+        ⚠
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="text-[13.5px] text-error-ink">
+          <span className="font-semibold">Generation failed</span>
+          {failure.nodeType ? (
+            <>
+              {" — node "}
+              <span className="mono text-error-glyph">{failure.nodeType}</span>
+              {failure.nodeId ? ` (#${failure.nodeId})` : ""}: {failure.message}
+            </>
+          ) : (
+            <> — {failure.message}</>
+          )}
+        </div>
+        <div className="mono mt-[2px] text-[11.5px] text-[#8a726c]">
+          {promptId ? `prompt_id ${promptId} · ${hint}` : hint}
+        </div>
+      </div>
+      {/* Best-effort: the primary diagnostic (node + reason) is already on screen,
+          so a file manager that won't open isn't worth surfacing over it. The
+          setup screen's OpenLogsButton, where the log is the only recourse, does
+          surface its own failure; here it need not. */}
+      <button
+        type="button"
+        onClick={() => void openLogs().catch(() => {})}
+        className="whitespace-nowrap rounded-[8px] border border-error-line bg-transparent px-[13px] py-[8px] text-[12.5px] text-[#e0a89f] transition-colors hover:border-[#5c352f] hover:bg-[#241514] hover:text-[#f0c4bc]"
+      >
+        View engine log ↗
+      </button>
+      <button
+        type="button"
+        onClick={onDismiss}
+        title="Dismiss"
+        aria-label="Dismiss"
+        className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-[8px] bg-transparent text-[14px] text-[#9a8a82] transition-colors hover:bg-[#241514] hover:text-[#e6ddd6]"
+      >
+        ✕
+      </button>
     </div>
   );
 }
@@ -375,6 +473,7 @@ export function Gallery({
   selectedId,
   onSelect,
   onCancel,
+  onRetry,
   onReuse,
   kept,
   onToggleKeep,
@@ -385,6 +484,8 @@ export function Gallery({
   selectedId: string | null;
   onSelect: (id: string) => void;
   onCancel: (id: string) => void;
+  /** Re-runs a failed job (the failed tile's ↻ retry). */
+  onRetry: (id: string) => void;
   onReuse: (job: Job) => void;
   kept: ReadonlySet<string>;
   onToggleKeep: (id: string) => void;
@@ -429,7 +530,7 @@ export function Gallery({
                     />
                   );
                 case "failed":
-                  return <FailedTile key={job.id} job={job} onCancel={() => onCancel(job.id)} />;
+                  return <FailedTile key={job.id} job={job} onRetry={() => onRetry(job.id)} />;
               }
             })}
           </div>
