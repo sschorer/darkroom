@@ -232,8 +232,13 @@ pub async fn model_status<R: Runtime>(
 pub fn reveal_logs<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let paths = Paths::resolve(app).map_err(|e| e.to_string())?;
     let logs = paths.logs();
-    std::fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
-    open::that_detached(&logs).map_err(|e| e.to_string())?;
+    // Name the path in the failure text: if the file manager won't open, the
+    // user's fallback is to browse to the folder themselves, so the message has
+    // to tell them where it is (§8.6 — errors are actionable).
+    std::fs::create_dir_all(&logs)
+        .map_err(|e| format!("Couldn't create the log folder ({}): {e}", logs.display()))?;
+    open::that_detached(&logs)
+        .map_err(|e| format!("Couldn't open the log folder ({}): {e}", logs.display()))?;
     Ok(())
 }
 

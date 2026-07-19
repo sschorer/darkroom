@@ -367,14 +367,26 @@ function Note({ children, tone }: { children: React.ReactNode; tone?: "warn" }) 
  * surfacing over the error the user is already reading.
  */
 function OpenLogsButton() {
+  // The button is itself an error-recovery affordance, so its own failure can't
+  // be silent: if opening the folder fails, show the reason (which names the
+  // path, from the Rust side) and let the click retry — a success clears it.
+  const [error, setError] = useState<string | null>(null);
   return (
-    <button
-      type="button"
-      onClick={() => void openLogs().catch(() => {})}
-      className="text-sm text-neutral-400 underline underline-offset-2 hover:text-neutral-200"
-    >
-      Open engine log
-    </button>
+    <div className="flex flex-col items-center gap-1">
+      <button
+        type="button"
+        onClick={() =>
+          void openLogs().then(
+            () => setError(null),
+            (e) => setError(String(e)),
+          )
+        }
+        className="text-sm text-neutral-400 underline underline-offset-2 hover:text-neutral-200"
+      >
+        Open engine log
+      </button>
+      {error && <span className="text-center text-xs text-amber-400">{error}</span>}
+    </div>
   );
 }
 
