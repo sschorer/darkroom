@@ -1,11 +1,9 @@
 @import "tailwindcss";
 
-/* It's a darkroom. #31 does the real visual pass; this is just a dark
-   surface to build on rather than a white flash on every launch. */
-@theme {
-  --color-surface: #0b0b0d;
-  --color-safelight: #d94f3d;
-}
+/* The M2 design foundations (#52): colour tokens, the two typefaces, and the
+   `.mono` face. Kept in its own module because every other M2 screen references
+   it. Imported after Tailwind so its `@theme` extends the default palette. */
+@import "./theme.css";
 
 html,
 body,
@@ -14,6 +12,11 @@ body,
 }
 
 body {
+  /* A dark surface to build on rather than a white flash on every launch, now
+     in the app's own typeface. `--color-surface` and the safelight accent are
+     defined in theme.css; the rest of the app draws from there too. */
   background-color: var(--color-surface);
-  color: #e6e6e6;
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
 }

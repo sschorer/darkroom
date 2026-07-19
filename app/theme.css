@@ -1,0 +1,146 @@
+/**
+ * The M2 "Studio" design foundations (GH #52): every colour, both typefaces,
+ * exactly as they appear in `docs/Darkroom Studio.dc.html` — the visual source
+ * of truth. Every other M2 screen references these tokens; nothing downstream
+ * should hard-code a hex that lives here.
+ *
+ * Tokens are Tailwind v4 `@theme` custom properties, so each `--color-*`
+ * doubles as a utility (`bg-panel`, `text-ink-2`, `border-line-3`) and as a
+ * raw `var(--color-*)` for the inline gradients the mockup leans on. One
+ * definition, both uses — the same stance the registry schema takes.
+ */
+
+/* Self-hosted: offline-first, and the CSP is `style-src 'self'` (see
+   app/fonts/README.md). Vite fingerprints and bundles these from the relative
+   paths below. `swap` so text paints in the fallback rather than blocking on a
+   local file that is always present anyway. */
+@font-face {
+  font-family: "Space Grotesk";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./fonts/space-grotesk-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Space Grotesk";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./fonts/space-grotesk-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Space Grotesk";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("./fonts/space-grotesk-600.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Space Grotesk";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("./fonts/space-grotesk-700.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./fonts/jetbrains-mono-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./fonts/jetbrains-mono-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("./fonts/jetbrains-mono-600.woff2") format("woff2");
+}
+
+@theme {
+  /* Typefaces. Space Grotesk is every UI string; JetBrains Mono is `.mono` —
+     any numeric or technical value (counts, seeds, params, paths, status). */
+  --font-sans: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+
+  /* --- Surfaces, back to front -------------------------------------------- */
+  /* Kept from the original index.css: the flash-guard background and the one
+     accent that predates this file. Downstream code already imports them. */
+  --color-surface: #0b0b0d; /* body / launch flash-guard */
+  --color-window: #0c0c0f; /* the app window's own fill */
+  --color-titlebar: #0a0a0d; /* chrome bar */
+
+  /* Raised panels — cards, rails, menus. Numbered lightest-last. */
+  --color-panel: #111114;
+  --color-panel-2: #131317;
+  --color-panel-3: #16161a;
+
+  /* Recessed / unselected wells. */
+  --color-inset: #0e0e11;
+  --color-inset-2: #0d0d10;
+
+  /* --- Hairlines ----------------------------------------------------------- */
+  /* Borders only. Numbered by how much they show against the surface behind
+     them — `line` is the quietest, `line-5` the most present. */
+  --color-line: #17171b;
+  --color-line-2: #1a1a1e;
+  --color-line-3: #1e1e23;
+  --color-line-4: #212127;
+  --color-line-5: #26262c;
+
+  /* --- Text ---------------------------------------------------------------- */
+  --color-ink: #e6e6ea; /* primary */
+  --color-ink-2: #d2d2d8; /* secondary — body copy on panels */
+  --color-ink-3: #c9c9cf; /* secondary — emphasised mono values */
+  --color-ink-4: #9a9aa2; /* secondary — labels, inactive rows */
+  --color-muted: #7a7a82; /* muted — descriptions */
+  --color-muted-2: #6b6b73; /* muted — counts */
+  --color-muted-3: #5a5a62; /* muted — section eyebrows, disabled */
+
+  /* --- Safelight (the accent) --------------------------------------------- */
+  --color-safelight: #d94f3d;
+  --color-safelight-hover: #ec6a58; /* link / hover lift */
+  /* The primary button is a gradient, not a flat fill — its endpoints and the
+     near-black ink that rides on it live here so #3's Generate button reads
+     from tokens rather than a pasted gradient. */
+  --color-primary-from: #e05942;
+  --color-primary-to: #c23a2a;
+  --color-primary-ink: #1a0906;
+
+  /* Red-tinted surface (the model selector pill in the compose bar). */
+  --color-tint: #171216;
+  --color-tint-line: #33242a;
+
+  /* --- Semantic states ----------------------------------------------------- */
+  --color-success: #8fb98a;
+  /* Error banner + failed tile (#7 surfaces these from real `node_errors`). */
+  --color-error-surface: rgba(30, 16, 15, 0.94);
+  --color-error-line: #4a2a26;
+  --color-error-glyph: #e07a6d;
+  --color-error-ink: #e8ccc6;
+}
+
+/* Any numeric or technical value is set in the mono face — the mockup's rule,
+   applied as a class the same way its source does. */
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* The safelight dot's soft pulse (titlebar + onboarding). Named, not inlined,
+   so every dot in the app breathes on the same clock. */
+@keyframes safelight-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}

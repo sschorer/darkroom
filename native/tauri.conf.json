@@ -12,13 +12,15 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Darkroom",
-        "width": 1100,
-        "height": 720,
+        "width": 1440,
+        "height": 920,
         "minWidth": 800,
         "minHeight": 600,
         "resizable": true,
-        "backgroundColor": "#0b0b0d"
+        "decorations": false,
+        "backgroundColor": "#0c0c0f"
       }
     ],
     "security": {

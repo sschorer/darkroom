@@ -122,6 +122,19 @@ pub fn run() {
             // Before this session can spawn its own engine, clear one a
             // hard-killed previous run left holding the GPU (§8.3).
             reclaim_engine(app.handle());
+
+            // The M2 design owns the window chrome: `decorations: false` plus a
+            // custom titlebar (ADR-019). The default menu (Menu::default, built
+            // above) renders as an in-window bar — Edit/Window/Help — on Windows
+            // and Linux, which would sit as a foreign grey strip directly below
+            // that titlebar. Hide it there. On macOS this is a documented no-op:
+            // the menu is app-wide and lives in the system bar, not the window,
+            // so Help → Open Logs (ADR-015) stays reachable. Best-effort, like
+            // the reclaim above — a window without a menu to hide isn't a reason
+            // to abort the launch.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.hide_menu();
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
