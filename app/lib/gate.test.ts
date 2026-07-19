@@ -7,6 +7,7 @@ import type { Manifest } from "./registry.schema";
 function manifest(over: Partial<Manifest> = {}): Manifest {
   return {
     id: "flux2-klein",
+    name: "FLUX.2 klein",
     kind: "image",
     enabled: true,
     license: "Apache-2.0",

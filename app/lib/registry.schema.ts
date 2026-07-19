@@ -42,6 +42,11 @@ export const ParamSpec = z.object({
 
 export const Manifest = z.object({
   id: z.string().regex(/^[a-z0-9-]+$/, "lowercase, digits and hyphens only"),
+  /** The human name shown in the UI — the compose-bar model pill (#25) and the
+   *  Settings model manager (#30). Distinct from `id`: `id` is the stable
+   *  slug (filenames, workflow lookup), `name` is what a person reads
+   *  ("FLUX.2 klein"), and one is not derivable from the other. */
+  name: z.string().min(1),
   kind: z.enum(["image", "video"]),
   enabled: z.boolean(),
   /** Free text, but it must be present. A model without a stated license is

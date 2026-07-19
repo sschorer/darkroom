@@ -1,5 +1,6 @@
 {
   "id": "flux2-klein",
+  "name": "FLUX.2 klein",
   "kind": "image",
   "enabled": true,
   "license": "Apache-2.0",

@@ -16,6 +16,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 
+import { ComposeBar } from "./ComposeBar";
 import { DownloadManager } from "./DownloadManager";
 import { Rail } from "./Rail";
 import { Settings } from "./Settings";
@@ -31,7 +32,9 @@ import {
 } from "./lib/engine";
 import { formatBytes } from "./lib/format";
 import { generate, type GenerateProgress } from "./lib/generate";
+import { applyGate, readVram, resolveInstalled, type ModelChoice } from "./lib/models";
 import { availableModels } from "./lib/registry";
+import type { ModelStatus } from "./lib/download";
 
 type View =
   | { phase: "checking" }
@@ -136,33 +139,145 @@ function Setup({ view, onInstall }: { view: View; onInstall: () => void }) {
 }
 
 /**
- * The Studio's main region: everything to the right of the rail. The compose
- * bar (#25) and the gallery + selected preview (#28) are its real content;
- * until then the walking-skeleton generator and model list keep the
- * engine→client→pixels path usable inside the new shell.
+ * The Studio's main region: everything to the right of the rail. Its real
+ * content is the gallery + selected preview (#28); until that lands, the
+ * install list and the last generated image keep the engine→client→pixels path
+ * visible inside the shell. The {@link ComposeBar} (#25) floats over it.
+ *
+ * This component is the orchestrator the bar reports to: it owns the resolved
+ * model list, the selection, and the generation run. Selection lives here (not
+ * in the bar) because generation needs the chosen model; the bar is the surface.
  */
 function StudioMain({ accelerator }: { accelerator: Accelerator }) {
-  return (
-    <main className="flex min-w-0 flex-1 flex-col items-center gap-4 overflow-auto p-8">
-      {/* The download manager (#21): once the engine is present, models can be
-          installed from a clean state without a terminal. The real picker with
-          VRAM gating and a license gate is #30. */}
-      <Models />
+  // The offered models with their install state and — once the menu has been
+  // opened — their VRAM verdict. `null` while the first resolve is in flight.
+  const [choices, setChoices] = useState<ModelChoice[] | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // The VRAM total, read lazily the first time the model menu opens. `null` =
+  // not yet read; `{ bytes }` = read (bytes may itself be null for no GPU).
+  const [vram, setVram] = useState<{ bytes: number | null } | null>(null);
+  const [prompt, setPrompt] = useState("a photo of a cat wearing a tiny hat, studio lighting");
+  const [gen, setGen] = useState<GenState>({ phase: "idle" });
 
-      {/* The gate (#11): one prompt, one image. Gated on CUDA — non-CUDA
-          generation is unusably slow and unsupported (Q5, TD-2), so offering
-          the button there would hand the user a 20-minute render. */}
-      {accelerator === "cuda" && <Generate />}
+  // Re-resolve the offered models' install state (mount, and whenever a download
+  // settles). Re-applies the VRAM gate if it's already known, so a model that
+  // finished installing keeps its verdict. The default selection is the first
+  // installed model, else the first offered — and a selection the user has since
+  // made is preserved across refreshes.
+  const loadChoices = useCallback(async () => {
+    const installed = await resolveInstalled();
+    const resolved = vram ? applyGate(installed, vram.bytes) : installed;
+    setChoices(resolved);
+    setSelectedId((current) => {
+      if (current && resolved.some((c) => c.manifest.id === current)) return current;
+      return (resolved.find((c) => c.installed) ?? resolved[0])?.manifest.id ?? null;
+    });
+  }, [vram]);
+
+  useEffect(() => {
+    void loadChoices();
+  }, [loadChoices]);
+
+  // A stable handler for the install list: an inline arrow would change identity
+  // every render (prompt keystrokes and progress ticks re-render StudioMain),
+  // and DownloadManager's refresh effect keys on it — so an unstable one re-walks
+  // every model's status on disk on every render. `loadChoices` already ignores
+  // the passed status; we just re-resolve.
+  const refreshChoices = useCallback(() => void loadChoices(), [loadChoices]);
+
+  // Opening the menu is the first thing that genuinely needs the engine (for the
+  // VRAM read behind the gating reasons), so it's deferred to here rather than
+  // spawned on mount. Best-effort: if the read fails the models stay selectable
+  // by their install state, just without a fit reason.
+  const onMenuOpen = useCallback(() => {
+    if (vram !== null) return;
+    void (async () => {
+      try {
+        const bytes = await readVram();
+        setVram({ bytes });
+        setChoices((prev) => (prev ? applyGate(prev, bytes) : prev));
+      } catch {
+        // Leave the gate unresolved; installed models still generate.
+      }
+    })();
+  }, [vram]);
+
+  const selected = choices?.find((c) => c.manifest.id === selectedId) ?? null;
+
+  // The image is a blob: URL the browser holds until revoked; leaving old ones
+  // unrevoked leaks memory across generations. Revoke on replacement and unmount.
+  const imageUrl = gen.phase === "done" ? gen.imageUrl : null;
+  useEffect(() => {
+    return () => {
+      if (imageUrl) URL.revokeObjectURL(imageUrl);
+    };
+  }, [imageUrl]);
+
+  const runGenerate = useCallback(() => {
+    setGen({ phase: "generating", progress: null });
+    void (async () => {
+      try {
+        const url = await generate(prompt, (p) =>
+          // Ignore progress that arrives after we've left the generating phase.
+          setGen((s) => (s.phase === "generating" ? { phase: "generating", progress: p } : s)),
+        );
+        setGen({ phase: "done", imageUrl: url });
+      } catch (e) {
+        setGen({ phase: "failed", error: String(e) });
+      }
+    })();
+  }, [prompt]);
+
+  // The bar's Generate is wired to the walking-skeleton path (#11), which is
+  // hardcoded to FLUX.2 klein and ignores the params. So it's offered only for
+  // an installed *image* model on CUDA — non-CUDA is unusably slow (Q5, TD-2)
+  // and the skeleton can't render video. Per-model, per-param submission through
+  // `buildWorkflow` is the queue (#27).
+  const busy = gen.phase === "generating";
+  const canGenerate =
+    accelerator === "cuda" && !!selected?.installed && selected.manifest.kind === "image";
+
+  return (
+    <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+      <div className="flex flex-1 flex-col items-center gap-4 overflow-auto p-8 pb-[120px]">
+        {/* The install list (#21): until the Settings model manager (#30), this
+            is how a model's weights get onto disk. The compose bar selects among
+            what's installed here. */}
+        <Models onStatusChange={refreshChoices} />
+
+        {gen.phase === "generating" && <GenProgress progress={gen.progress} />}
+
+        {gen.phase === "failed" && (
+          <div className="flex w-full max-w-md flex-col items-center gap-3">
+            <pre className="max-h-60 w-full overflow-auto whitespace-pre-wrap rounded bg-neutral-900 p-3 text-left text-xs text-red-300">
+              {gen.error}
+            </pre>
+            <OpenLogsButton />
+          </div>
+        )}
+
+        {gen.phase === "done" && (
+          <img src={gen.imageUrl} alt={prompt} className="w-full max-w-md rounded" />
+        )}
+      </div>
+
+      <ComposeBar
+        choices={choices ?? []}
+        selected={selected?.manifest ?? null}
+        onSelect={(manifest) => setSelectedId(manifest.id)}
+        onMenuOpen={onMenuOpen}
+        accelerator={accelerator}
+        prompt={prompt}
+        onPromptChange={setPrompt}
+        onGenerate={runGenerate}
+        busy={busy}
+        canGenerate={canGenerate}
+      />
     </main>
   );
 }
 
-/**
- * The walking-skeleton generator: a prompt, a button, an image (#11). No model
- * choice, no history, no cancel — those are later. It exists to prove the
- * engine→client→pixels path end to end on the developer's own GPU, which is the
- * milestone gate this whole M0 leads to.
- */
+/** The generation run state: idle, sampling, a finished image, or a failure. */
 type GenState =
   | { phase: "idle" }
   // `progress` is null from the click until the first sampling event — a window
@@ -172,67 +287,6 @@ type GenState =
   | { phase: "done"; imageUrl: string }
   | { phase: "failed"; error: string };
 
-function Generate() {
-  const [prompt, setPrompt] = useState("a photo of a cat wearing a tiny hat, studio lighting");
-  const [state, setState] = useState<GenState>({ phase: "idle" });
-
-  // The image is a blob: URL the browser holds until revoked; leaving old ones
-  // unrevoked leaks memory across generations. Revoke on replacement and unmount.
-  const imageUrl = state.phase === "done" ? state.imageUrl : null;
-  useEffect(() => {
-    return () => {
-      if (imageUrl) URL.revokeObjectURL(imageUrl);
-    };
-  }, [imageUrl]);
-
-  const run = useCallback(() => {
-    setState({ phase: "generating", progress: null });
-    void (async () => {
-      try {
-        const url = await generate(prompt, (p) =>
-          // Ignore progress that arrives after we've left the generating phase.
-          setState((s) => (s.phase === "generating" ? { phase: "generating", progress: p } : s)),
-        );
-        setState({ phase: "done", imageUrl: url });
-      } catch (e) {
-        setState({ phase: "failed", error: String(e) });
-      }
-    })();
-  }, [prompt]);
-
-  const busy = state.phase === "generating";
-
-  return (
-    <section className="mt-6 flex w-full max-w-md flex-col items-center gap-3">
-      <textarea
-        value={prompt}
-        onChange={(e) => setPrompt(e.target.value)}
-        disabled={busy}
-        rows={3}
-        className="w-full resize-none rounded bg-neutral-900 p-3 text-sm text-neutral-100 disabled:opacity-50"
-      />
-      <Button onClick={run} disabled={busy || prompt.trim() === ""}>
-        {busy ? "Generating…" : "Generate"}
-      </Button>
-
-      {state.phase === "generating" && <GenProgress progress={state.progress} />}
-
-      {state.phase === "failed" && (
-        <>
-          <pre className="max-h-60 w-full overflow-auto whitespace-pre-wrap rounded bg-neutral-900 p-3 text-left text-xs text-red-300">
-            {state.error}
-          </pre>
-          <OpenLogsButton />
-        </>
-      )}
-
-      {state.phase === "done" && (
-        <img src={state.imageUrl} alt={prompt} className="w-full rounded" />
-      )}
-    </section>
-  );
-}
-
 /** Sampling progress: a byte-less bar once the engine reports steps, a plain
  * line before that (which spans the cold engine start). */
 function GenProgress({ progress }: { progress: GenerateProgress | null }) {
@@ -240,7 +294,7 @@ function GenProgress({ progress }: { progress: GenerateProgress | null }) {
     return <Note>Starting the engine and queuing the prompt…</Note>;
   }
   return (
-    <div className="flex w-full flex-col items-center gap-1">
+    <div className="flex w-full max-w-md flex-col items-center gap-1">
       <Bar received={progress.value} total={progress.max} />
       <p className="text-xs tabular-nums text-neutral-500">
         step {progress.value} of {progress.max}
@@ -251,18 +305,18 @@ function GenProgress({ progress }: { progress: GenerateProgress | null }) {
 
 /**
  * The installable models (#21). Lists what the bundle offers and hands each to a
- * {@link DownloadManager}. Deliberately flat — no VRAM gating or license gate
- * here; that is the model picker (#27), which reads the engine's real VRAM and
- * disables what won't fit (#20). This exists so a model can be installed at all.
+ * {@link DownloadManager}. Deliberately flat — VRAM gating and the license gate
+ * are the compose-bar menu's (#25) and the Settings model manager's (#30) job.
+ * This exists so a model can be installed at all until that manager lands.
  */
-function Models() {
+function Models({ onStatusChange }: { onStatusChange?: (status: ModelStatus) => void }) {
   const models = availableModels();
   if (models.length === 0) return null;
   return (
     <section className="mt-6 flex w-full max-w-md flex-col gap-3">
       <h2 className="text-sm font-semibold text-neutral-300">Models</h2>
       {models.map((manifest) => (
-        <DownloadManager key={manifest.id} manifest={manifest} />
+        <DownloadManager key={manifest.id} manifest={manifest} onStatusChange={onStatusChange} />
       ))}
     </section>
   );

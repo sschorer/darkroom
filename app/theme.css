@@ -114,9 +114,14 @@
   --color-primary-to: #c23a2a;
   --color-primary-ink: #1a0906;
 
-  /* Red-tinted surface (the model selector pill in the compose bar). */
+  /* Red-tinted surface (the model selector pill in the compose bar, #25). The
+     hover pair lifts the pill; `tint-sub` is the warm mono subline under the
+     model name ("image · CUDA"). */
   --color-tint: #171216;
   --color-tint-line: #33242a;
+  --color-tint-hover: #1d1519;
+  --color-tint-line-hover: #43303a;
+  --color-tint-sub: #7a726a;
 
   /* --- Studio rail queue block (#53) -------------------------------------- */
   /* The live-generation summary pinned in the studio left rail: a warm,

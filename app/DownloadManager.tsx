@@ -38,17 +38,28 @@ type State =
   // got; `null` only if the very first status read is what failed.
   | { phase: "failed"; status: ModelStatus | null; error: string };
 
-export function DownloadManager({ manifest }: { manifest: Manifest }) {
+export function DownloadManager({
+  manifest,
+  onStatusChange,
+}: {
+  manifest: Manifest;
+  /** Called with each fresh {@link ModelStatus} read (mount and after every
+   *  settle). The compose bar (#25) uses it to notice a model becoming installed
+   *  without re-walking the disk itself. */
+  onStatusChange?: (status: ModelStatus) => void;
+}) {
   const [state, setState] = useState<State>({ phase: "checking" });
   const files = manifest.files;
 
   const refresh = useCallback(async () => {
     try {
-      setState({ phase: "idle", status: await modelStatus(files) });
+      const status = await modelStatus(files);
+      setState({ phase: "idle", status });
+      onStatusChange?.(status);
     } catch (e) {
       setState({ phase: "failed", status: null, error: String(e) });
     }
-  }, [files]);
+  }, [files, onStatusChange]);
 
   useEffect(() => {
     void refresh();

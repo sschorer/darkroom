@@ -81,6 +81,7 @@ describe("crossCheck", () => {
   function manifest(over: Partial<Manifest> = {}): Manifest {
     return {
       id: "fixture",
+      name: "Fixture",
       kind: "image",
       enabled: true,
       license: "Apache-2.0",

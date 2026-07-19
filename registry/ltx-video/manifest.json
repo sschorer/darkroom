@@ -1,5 +1,6 @@
 {
   "id": "ltx-video",
+  "name": "LTX-Video",
   "kind": "video",
   "enabled": true,
   "license": "LTXV 2B 0.9.5 Open RAIL-M License",
