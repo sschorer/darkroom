@@ -1,22 +1,31 @@
 /**
- * Walking skeleton. Deliberately almost nothing — #11 is the first issue that
- * makes this window generate anything, and #31 is the visual pass.
+ * The Studio shell (#53): the app is a three-screen surface — Setup, Studio,
+ * Settings — inside the custom window chrome (#52).
  *
- * The setup button exists because #4's done-criterion is "cold machine to
- * working ComfyUI", and nothing can demonstrate that if nothing invokes it. It
- * is not the onboarding flow (#29) — that's out of scope here — but the
- * ten-minute wait now shows what it's doing (#5), which is the difference
- * between "working" and "hung" (Q2).
+ * Routing is deliberately not a library. **Setup is not a place you navigate
+ * to** — it is what the app *is* until the engine is ready, so it is derived
+ * from the engine state rather than stored: you cannot open the Studio without
+ * an engine to run it. The only user-driven navigation is Studio ⇄ Settings,
+ * held in `nav`. This keeps "am I set up?" a single source of truth (the engine
+ * status) instead of a screen flag that can disagree with it.
+ *
+ * The Studio's compose bar (#25) and gallery (#28) replace the walking-skeleton
+ * generator that fills its main today; the Settings content (#30) and the
+ * first-run onboarding that will supersede this bare Setup (#31) are later. This
+ * issue owns the frame: the rail, the routing, and the way back.
  */
 import { useCallback, useEffect, useState } from "react";
 
 import { DownloadManager } from "./DownloadManager";
+import { Rail } from "./Rail";
+import { Settings } from "./Settings";
 import { TitleBar } from "./TitleBar";
 import {
   bootstrapEngine,
   engineStatus,
   onEngineProgress,
   openLogs,
+  type Accelerator,
   type EngineProgress,
   type EngineStatus,
 } from "./lib/engine";
@@ -37,6 +46,9 @@ type View =
 
 export default function App() {
   const [view, setView] = useState<View>({ phase: "checking" });
+  // Studio ⇄ Settings only. Setup is derived below, never stored — it is the
+  // absence of a ready engine, not a screen you toggle to.
+  const [nav, setNav] = useState<"studio" | "settings">("studio");
 
   const check = useCallback(async () => {
     try {
@@ -80,35 +92,68 @@ export default function App() {
     }
   }, [check]);
 
+  // The one source of truth for "which screen": a ready engine unlocks the
+  // Studio (and, from there, Settings); anything short of ready is still Setup.
+  const ready = view.phase === "idle" && view.status.state === "ready" ? view.status : null;
+  const screen: "setup" | "studio" | "settings" = !ready ? "setup" : nav;
+
+  // The mono titlebar subline is per-screen content (#52 left it empty pending
+  // this issue). "128 outputs" mirrors the rail's static All-outputs count and
+  // becomes a live total with the library (#28).
+  const subtitle =
+    screen === "settings" ? "settings" : screen === "setup" ? "first run" : "128 outputs";
+
   return (
-    // The window shell (#52): the custom titlebar owns the top 44px, the
-    // walking-skeleton content fills and scrolls below it. The Studio shell,
-    // rail, and screen routing land in #2 — this is just the chrome plus the
-    // app-surface fill (`bg-window`) the decorationless window sits on.
+    // The window shell (#52): the custom titlebar owns the top 44px; the active
+    // screen fills the `bg-window` surface below it.
     <div className="flex h-full flex-col bg-window">
-      <TitleBar />
-      <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col items-center justify-center gap-4 overflow-auto p-8">
-        <h1 className="text-2xl font-semibold tracking-tight">Darkroom</h1>
-        <p className="text-sm text-neutral-400">Generate images and video on your own GPU.</p>
-
-        <Engine view={view} onInstall={() => void install()} />
-
-        {/* The download manager (#21): once the engine is present, models can be
-          installed from a clean state without a terminal. The real picker with
-          VRAM gating and a license gate is #27; this lists the available models
-          and installs them, which is what #21's done-criterion asks for. */}
-        {view.phase === "idle" && view.status.state === "ready" && <Models />}
-
-        {/* The gate (#11): once the engine is installed, one prompt, one image.
-          Deliberately spare — #31 is the visual pass, M1 makes models data.
-          Gated on CUDA: the Engine note above says non-CUDA generation is
-          unusably slow and unsupported (Q5, TD-2), so offering the button there
-          would contradict it and hand the user a 20-minute render. */}
-        {view.phase === "idle" &&
-          view.status.state === "ready" &&
-          view.status.installed.accelerator === "cuda" && <Generate />}
-      </main>
+      <TitleBar subtitle={subtitle} />
+      {screen === "setup" && <Setup view={view} onInstall={() => void install()} />}
+      {screen === "studio" && ready && (
+        <div className="flex min-h-0 flex-1">
+          <Rail onOpenSettings={() => setNav("settings")} />
+          <StudioMain accelerator={ready.installed.accelerator} />
+        </div>
+      )}
+      {screen === "settings" && <Settings onBack={() => setNav("studio")} />}
     </div>
+  );
+}
+
+/**
+ * The Setup screen: the engine bootstrap made legible (#4, #5). Shown until the
+ * engine is ready — the first-run onboarding that will supersede it (#31) is a
+ * later, richer flow. Centred on the window surface, no rail.
+ */
+function Setup({ view, onInstall }: { view: View; onInstall: () => void }) {
+  return (
+    <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col items-center justify-center gap-4 overflow-auto p-8">
+      <h1 className="text-2xl font-semibold tracking-tight">Darkroom</h1>
+      <p className="text-sm text-muted">Generate images and video on your own GPU.</p>
+      <Engine view={view} onInstall={onInstall} />
+    </main>
+  );
+}
+
+/**
+ * The Studio's main region: everything to the right of the rail. The compose
+ * bar (#25) and the gallery + selected preview (#28) are its real content;
+ * until then the walking-skeleton generator and model list keep the
+ * engine→client→pixels path usable inside the new shell.
+ */
+function StudioMain({ accelerator }: { accelerator: Accelerator }) {
+  return (
+    <main className="flex min-w-0 flex-1 flex-col items-center gap-4 overflow-auto p-8">
+      {/* The download manager (#21): once the engine is present, models can be
+          installed from a clean state without a terminal. The real picker with
+          VRAM gating and a license gate is #30. */}
+      <Models />
+
+      {/* The gate (#11): one prompt, one image. Gated on CUDA — non-CUDA
+          generation is unusably slow and unsupported (Q5, TD-2), so offering
+          the button there would hand the user a 20-minute render. */}
+      {accelerator === "cuda" && <Generate />}
+    </main>
   );
 }
 
