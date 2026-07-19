@@ -118,6 +118,16 @@
   --color-tint: #171216;
   --color-tint-line: #33242a;
 
+  /* --- Studio rail queue block (#53) -------------------------------------- */
+  /* The live-generation summary pinned in the studio left rail: a warm,
+     near-black red that reads as "working" without the full safelight weight.
+     Scoped here so the rail draws from tokens like every other surface rather
+     than pasting hexes into the component. */
+  --color-queue-bg: #141014; /* block fill */
+  --color-queue-line: #2a1c1a; /* block border */
+  --color-queue-ink: #c7796d; /* "generating 3/4" label */
+  --color-queue-track: #241618; /* progress-bar track under the safelight fill */
+
   /* --- Window chrome (the custom titlebar, #52 / ADR-019) ------------------ */
   /* Control-local values the mockup uses only here — kept as tokens so the
      palette still has one home rather than leaking hexes into TitleBar.tsx. */
