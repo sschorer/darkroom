@@ -177,6 +177,17 @@ export async function runGeneration(
     }
 
     submittedId = await client.submit(workflow);
+    // An abort that raced the /prompt POST fired its interrupt (in `onAbort`)
+    // before the engine had our prompt to interrupt — a no-op that would leave
+    // the engine sampling a run we've abandoned. Now that the prompt is queued,
+    // interrupt it for real and unwind as cancelled, before replaying events or
+    // awaiting a completion we'd only discard. Best-effort interrupt, so a cancel
+    // still settles as GenerationCancelled (the queue's drop-the-tile signal)
+    // rather than as a failure if the interrupt POST itself fails.
+    if (signal?.aborted) {
+      await client.interrupt().catch(() => {});
+      throw new GenerationCancelled();
+    }
     // Replay whatever arrived while the id was unknown, in order. Synchronous,
     // so no live event can interleave between assigning the id and draining.
     for (const event of pending) {

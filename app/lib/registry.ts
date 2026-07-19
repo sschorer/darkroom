@@ -39,9 +39,10 @@ const manifestModules = import.meta.glob<{ default: unknown }>("../../registry/*
  * is loaded through {@link manifestModules} above; matching only the workflow by
  * its manifest-declared filename keeps the two from crossing.
  */
-const workflowModules = import.meta.glob<{ default: unknown }>("../../registry/**/*.json", {
-  eager: true,
-});
+const workflowModules = import.meta.glob<{ default: unknown }>(
+  ["../../registry/**/*.json", "!../../registry/**/manifest.json"],
+  { eager: true },
+);
 
 /** A parsed manifest and the bundle path it came from. The path is the
  *  structural staging signal (`_staged/`) — kept alongside the manifest so the

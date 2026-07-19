@@ -220,6 +220,40 @@ describe("runGeneration cancellation", () => {
     );
   });
 
+  it("interrupts the queued prompt and cancels when the abort races the /prompt POST", async () => {
+    // Hold /prompt open so the abort lands while submit() is still in flight —
+    // the window where onAbort's interrupt fires before the engine has our
+    // prompt, so the post-submit re-check must interrupt it for real.
+    let releasePrompt!: () => void;
+    const promptInFlight = new Promise<void>((r) => (releasePrompt = r));
+    fetchMock.mockImplementation(async (input: string | URL) => {
+      const url = String(input);
+      if (url.includes("/prompt")) {
+        await promptInFlight;
+        return jsonRes({ prompt_id: "P1" });
+      }
+      if (url.includes("/interrupt")) return { ok: true, status: 200 } as Response;
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const controller = new AbortController();
+    const p = runGeneration({}, { onProgress: vi.fn(), signal: controller.signal });
+    await flush();
+    socket().open();
+    await flush(); // now blocked at `await client.submit(workflow)`
+
+    controller.abort(); // aborts while /prompt is still pending
+    releasePrompt(); // submit() resolves: the post-submit guard interrupts + cancels
+
+    await expect(p).rejects.toBeInstanceOf(GenerationCancelled);
+    // The engine was told to stop the prompt it did end up accepting, not left
+    // sampling a run we abandoned.
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/interrupt"),
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
   it("throws GenerationCancelled without submitting for an already-aborted signal", async () => {
     // No `flush()` before the assertion: `expect(p).rejects` must attach its
     // handler before the (imminent) rejection lands, or it reads as unhandled.
