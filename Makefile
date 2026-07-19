@@ -55,9 +55,19 @@ sidecar: ## Fetch the uv sidecar for this host and check it runs (idempotent; AD
 
 # ---------------------------------------------------------------- run
 
+# WEBKIT_DISABLE_DMABUF_RENDERER: WebKitGTK's dmabuf compositing path deadlocks
+# the NVIDIA proprietary driver on teardown — the webview's GPU thread wedges in
+# `exit_mmap` unmapping GPU memory, leaving an unkillable D-state task that no
+# signal (not even SIGKILL) can clear. The process never reaps, it keeps the
+# Wayland connection open so the compositor can't drop the now-frozen window, and
+# only a reboot recovers the session. It's Linux-only (macOS/Windows use WKWebView
+# / WebView2 and ignore this var) and dev-only (`tauri build` never opens a live
+# webview), so it lives on `dev` alone. Disabling only the dmabuf *renderer* keeps
+# the rest of GPU-accelerated rendering — a lighter hammer than
+# WEBKIT_DISABLE_COMPOSITING_MODE, which turns compositing off wholesale.
 .PHONY: dev
 dev: sidecar ## Run the app (tauri dev — opens a window)
-	$(PNPM) tauri dev
+	WEBKIT_DISABLE_DMABUF_RENDERER=1 $(PNPM) tauri dev
 
 .PHONY: web
 web: ## Run only the frontend in a browser, no Rust build
