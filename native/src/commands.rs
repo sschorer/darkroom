@@ -221,3 +221,26 @@ pub async fn model_status<R: Runtime>(
     let paths = Paths::resolve(&app).map_err(|e| e.to_string())?;
     downloads::status(&paths.models(), &files)
 }
+
+/// Reveals the engine-log directory in the OS file manager (ADR-015).
+///
+/// The directory, not the file: it holds the rotated backups and exists even
+/// before the engine first runs (we create it), so it is never a dead click.
+/// Shared by the macOS Help → Open Logs menu item ([`crate::handle_menu_event`])
+/// and the [`open_logs`] command that replaces it on Windows/Linux, where the
+/// M2 chrome hides the native menu (ADR-019).
+pub fn reveal_logs<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let paths = Paths::resolve(app).map_err(|e| e.to_string())?;
+    let logs = paths.logs();
+    std::fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
+    open::that_detached(&logs).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Frontend entry point to [`reveal_logs`]. With the native menu hidden on
+/// Windows/Linux (ADR-019), the failure views call this so the engine log — the
+/// only place the real Python error lives (§8.6) — stays one click away.
+#[tauri::command]
+pub async fn open_logs<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    reveal_logs(&app)
+}

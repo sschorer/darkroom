@@ -16,6 +16,7 @@ import {
   bootstrapEngine,
   engineStatus,
   onEngineProgress,
+  openLogs,
   type EngineProgress,
   type EngineStatus,
 } from "./lib/engine";
@@ -172,9 +173,12 @@ function Generate() {
       {state.phase === "generating" && <GenProgress progress={state.progress} />}
 
       {state.phase === "failed" && (
-        <pre className="max-h-60 w-full overflow-auto whitespace-pre-wrap rounded bg-neutral-900 p-3 text-left text-xs text-red-300">
-          {state.error}
-        </pre>
+        <>
+          <pre className="max-h-60 w-full overflow-auto whitespace-pre-wrap rounded bg-neutral-900 p-3 text-left text-xs text-red-300">
+            {state.error}
+          </pre>
+          <OpenLogsButton />
+        </>
       )}
 
       {state.phase === "done" && (
@@ -234,7 +238,10 @@ function Engine({ view, onInstall }: { view: View; onInstall: () => void }) {
         <pre className="max-h-80 w-full overflow-auto whitespace-pre-wrap rounded bg-neutral-900 p-3 text-left text-xs text-red-300">
           {view.error}
         </pre>
-        <Button onClick={view.retry}>Try again</Button>
+        <div className="flex items-center gap-4">
+          <Button onClick={view.retry}>Try again</Button>
+          <OpenLogsButton />
+        </div>
       </>
     );
   }
@@ -349,6 +356,25 @@ function Note({ children, tone }: { children: React.ReactNode; tone?: "warn" }) 
     <p className={`text-center text-sm ${tone === "warn" ? "text-amber-400" : "text-neutral-400"}`}>
       {children}
     </p>
+  );
+}
+
+/**
+ * Reveals the engine log — where the real Python error actually is (§8.6).
+ * Offered in the failure views because the native Help → Open Logs menu is
+ * hidden on Windows/Linux (ADR-019), and "Generation failed" without the log is
+ * unactionable. Best-effort: a file manager that won't open isn't worth
+ * surfacing over the error the user is already reading.
+ */
+function OpenLogsButton() {
+  return (
+    <button
+      type="button"
+      onClick={() => void openLogs().catch(() => {})}
+      className="text-sm text-neutral-400 underline underline-offset-2 hover:text-neutral-200"
+    >
+      Open engine log
+    </button>
   );
 }
 

@@ -118,6 +118,14 @@
   --color-tint: #171216;
   --color-tint-line: #33242a;
 
+  /* --- Window chrome (the custom titlebar, #52 / ADR-019) ------------------ */
+  /* Control-local values the mockup uses only here — kept as tokens so the
+     palette still has one home rather than leaking hexes into TitleBar.tsx. */
+  --color-control-ink: #8a8a92; /* idle min/max/close glyph */
+  --color-control-hover: #1c1c22; /* neutral control hover bg */
+  --color-control-close-hover: #c23a2a; /* close-button hover bg */
+  --color-titlebar-sub: #4d4d55; /* the mono subline */
+
   /* --- Semantic states ----------------------------------------------------- */
   --color-success: #8fb98a;
   /* Error banner + failed tile (#7 surfaces these from real `node_errors`). */

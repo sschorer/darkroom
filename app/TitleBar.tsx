@@ -47,7 +47,7 @@ export function TitleBar({ subtitle }: { subtitle?: string }) {
           Darkroom
         </span>
         {subtitle && (
-          <span data-tauri-drag-region className="mono ml-1 text-[12px] text-[#4d4d55]">
+          <span data-tauri-drag-region className="mono ml-1 text-[12px] text-titlebar-sub">
             {subtitle}
           </span>
         )}
@@ -73,7 +73,8 @@ export function TitleBar({ subtitle }: { subtitle?: string }) {
 }
 
 /** A single 42×30 control. `danger` is the close button's red hover; the other
- * two share the neutral `#1c1c22` hover from the mockup. */
+ * two share the neutral hover. All three colours are chrome tokens in
+ * theme.css so the palette stays single-sourced. */
 function WindowButton({
   label,
   onClick,
@@ -90,8 +91,10 @@ function WindowButton({
       type="button"
       aria-label={label}
       onClick={onClick}
-      className={`inline-flex h-[30px] w-[42px] items-center justify-center rounded-[7px] text-[#8a8a92] transition-colors hover:text-[#e6e6ea] ${
-        danger ? "hover:bg-[#c23a2a] hover:text-white" : "hover:bg-[#1c1c22]"
+      className={`inline-flex h-[30px] w-[42px] items-center justify-center rounded-[7px] text-control-ink transition-colors ${
+        danger
+          ? "hover:bg-control-close-hover hover:text-white"
+          : "hover:bg-control-hover hover:text-ink"
       }`}
     >
       {children}

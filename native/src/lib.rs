@@ -69,20 +69,16 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 
 /// Reveals the logs directory in the OS file manager when "Open Logs" is chosen.
 ///
-/// The directory, not the file: it holds the rotated backups too, and it exists
-/// (we create it) even when the engine has never run to write `engine.log` — so
-/// the menu item is never a dead click. All best-effort; a desktop app must not
-/// panic because a file manager wouldn't open.
+/// Shares [`commands::reveal_logs`] with the frontend `open_logs` command (the
+/// cross-platform route now that ADR-019 hides this menu on Windows/Linux).
+/// Best-effort here: a desktop app must not panic because a file manager
+/// wouldn't open, and a menu click has no Result to surface anyway.
 fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: tauri::menu::MenuEvent) {
     if event.id() != OPEN_LOGS_MENU_ID {
         return;
     }
 
-    if let Ok(paths) = Paths::resolve(app) {
-        let logs = paths.logs();
-        let _ = std::fs::create_dir_all(&logs);
-        let _ = open::that_detached(&logs);
-    }
+    let _ = commands::reveal_logs(app);
 }
 
 /// Kills a leaked engine (§8.3). Called at boot and again at exit; both go
@@ -143,7 +139,8 @@ pub fn run() {
             commands::start_engine,
             commands::download_model,
             commands::cancel_download,
-            commands::model_status
+            commands::model_status,
+            commands::open_logs
         ])
         .build(tauri::generate_context!());
 
