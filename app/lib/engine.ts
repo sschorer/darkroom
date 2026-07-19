@@ -79,9 +79,18 @@ export type EngineLog = LogLine;
 
 /**
  * Subscribes to the engine's live log. The same lines are also written to a
- * rotating file on disk (revealed by Help → Open Logs), so a traceback survives
+ * rotating file on disk (revealed by {@link openLogs}), so a traceback survives
  * even with no listener; this is only for showing it as it happens. Resolves to
  * an unlisten function — call it when the view that shows logs goes away.
  */
 export const onEngineLog = (cb: (l: EngineLog) => void): Promise<UnlistenFn> =>
   listen<EngineLog>("engine://log", (e) => cb(e.payload));
+
+/**
+ * Reveals the engine-log directory in the OS file manager (ADR-015). The real
+ * Python error lives in that log, several layers from anything the UI shows
+ * (§8.6), so the failure views offer this as a one-click route to it. It's the
+ * frontend replacement for Help → Open Logs, which the M2 chrome hides on
+ * Windows/Linux (ADR-019).
+ */
+export const openLogs = () => invoke<void>("open_logs");

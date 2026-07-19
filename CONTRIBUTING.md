@@ -62,8 +62,7 @@ sudo apt install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
   patchelf libfuse2 file build-essential curl wget
 
 pnpm install
-node scripts/fetch-uv.mjs   # pulls the uv sidecar for your triple
-pnpm tauri dev
+make dev   # fetches the uv sidecar, then runs the app (Makefile owns the run flags)
 ```
 
 First run provisions ~6GB into appdata (Python, torch, ComfyUI at the pinned SHA). Expect ~10 minutes. You need an NVIDIA GPU with ≥8GB VRAM to generate anything; you do **not** need one to work on most of the codebase.

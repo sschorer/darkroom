@@ -11,10 +11,12 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { DownloadManager } from "./DownloadManager";
+import { TitleBar } from "./TitleBar";
 import {
   bootstrapEngine,
   engineStatus,
   onEngineProgress,
+  openLogs,
   type EngineProgress,
   type EngineStatus,
 } from "./lib/engine";
@@ -79,27 +81,34 @@ export default function App() {
   }, [check]);
 
   return (
-    <main className="mx-auto flex h-full max-w-2xl flex-col items-center justify-center gap-4 p-8">
-      <h1 className="text-2xl font-semibold tracking-tight">Darkroom</h1>
-      <p className="text-sm text-neutral-400">Generate images and video on your own GPU.</p>
+    // The window shell (#52): the custom titlebar owns the top 44px, the
+    // walking-skeleton content fills and scrolls below it. The Studio shell,
+    // rail, and screen routing land in #2 — this is just the chrome plus the
+    // app-surface fill (`bg-window`) the decorationless window sits on.
+    <div className="flex h-full flex-col bg-window">
+      <TitleBar />
+      <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col items-center justify-center gap-4 overflow-auto p-8">
+        <h1 className="text-2xl font-semibold tracking-tight">Darkroom</h1>
+        <p className="text-sm text-neutral-400">Generate images and video on your own GPU.</p>
 
-      <Engine view={view} onInstall={() => void install()} />
+        <Engine view={view} onInstall={() => void install()} />
 
-      {/* The download manager (#21): once the engine is present, models can be
+        {/* The download manager (#21): once the engine is present, models can be
           installed from a clean state without a terminal. The real picker with
           VRAM gating and a license gate is #27; this lists the available models
           and installs them, which is what #21's done-criterion asks for. */}
-      {view.phase === "idle" && view.status.state === "ready" && <Models />}
+        {view.phase === "idle" && view.status.state === "ready" && <Models />}
 
-      {/* The gate (#11): once the engine is installed, one prompt, one image.
+        {/* The gate (#11): once the engine is installed, one prompt, one image.
           Deliberately spare — #31 is the visual pass, M1 makes models data.
           Gated on CUDA: the Engine note above says non-CUDA generation is
           unusably slow and unsupported (Q5, TD-2), so offering the button there
           would contradict it and hand the user a 20-minute render. */}
-      {view.phase === "idle" &&
-        view.status.state === "ready" &&
-        view.status.installed.accelerator === "cuda" && <Generate />}
-    </main>
+        {view.phase === "idle" &&
+          view.status.state === "ready" &&
+          view.status.installed.accelerator === "cuda" && <Generate />}
+      </main>
+    </div>
   );
 }
 
@@ -164,9 +173,12 @@ function Generate() {
       {state.phase === "generating" && <GenProgress progress={state.progress} />}
 
       {state.phase === "failed" && (
-        <pre className="max-h-60 w-full overflow-auto whitespace-pre-wrap rounded bg-neutral-900 p-3 text-left text-xs text-red-300">
-          {state.error}
-        </pre>
+        <>
+          <pre className="max-h-60 w-full overflow-auto whitespace-pre-wrap rounded bg-neutral-900 p-3 text-left text-xs text-red-300">
+            {state.error}
+          </pre>
+          <OpenLogsButton />
+        </>
       )}
 
       {state.phase === "done" && (
@@ -226,7 +238,10 @@ function Engine({ view, onInstall }: { view: View; onInstall: () => void }) {
         <pre className="max-h-80 w-full overflow-auto whitespace-pre-wrap rounded bg-neutral-900 p-3 text-left text-xs text-red-300">
           {view.error}
         </pre>
-        <Button onClick={view.retry}>Try again</Button>
+        <div className="flex items-center gap-4">
+          <Button onClick={view.retry}>Try again</Button>
+          <OpenLogsButton />
+        </div>
       </>
     );
   }
@@ -341,6 +356,37 @@ function Note({ children, tone }: { children: React.ReactNode; tone?: "warn" }) 
     <p className={`text-center text-sm ${tone === "warn" ? "text-amber-400" : "text-neutral-400"}`}>
       {children}
     </p>
+  );
+}
+
+/**
+ * Reveals the engine log — where the real Python error actually is (§8.6).
+ * Offered in the failure views because the native Help → Open Logs menu is
+ * hidden on Windows/Linux (ADR-019), and "Generation failed" without the log is
+ * unactionable. Best-effort: a file manager that won't open isn't worth
+ * surfacing over the error the user is already reading.
+ */
+function OpenLogsButton() {
+  // The button is itself an error-recovery affordance, so its own failure can't
+  // be silent: if opening the folder fails, show the reason (which names the
+  // path, from the Rust side) and let the click retry — a success clears it.
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <div className="flex flex-col items-center gap-1">
+      <button
+        type="button"
+        onClick={() =>
+          void openLogs().then(
+            () => setError(null),
+            (e) => setError(String(e)),
+          )
+        }
+        className="text-sm text-neutral-400 underline underline-offset-2 hover:text-neutral-200"
+      >
+        Open engine log
+      </button>
+      {error && <span className="text-center text-xs text-amber-400">{error}</span>}
+    </div>
   );
 }
 

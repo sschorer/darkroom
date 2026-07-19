@@ -38,6 +38,7 @@ Things that are wrong in ways you can't see from the code:
 - **`buildWorkflow` must throw on a missing node ID.** Silently skipping lets a stale manifest generate garbage (ADR-005).
 - **New models go in `registry/_staged/` with `enabled: false`.** Promoting one to a default is a product decision needing an ADR-006 amendment, not a PR.
 - **Weights never enter the repo.** Manifests hold URLs; downloads land in appdata.
+- **`make dev`, not `pnpm tauri dev`, on Linux/NVIDIA.** WebKitGTK's dmabuf renderer deadlocks the NVIDIA driver when the dev webview tears down: a thread wedges in `exit_mmap` unmapping GPU memory as an unkillable D-state task, no signal touches it, the frozen window can't be closed, and only a reboot recovers. The `dev` target disables that renderer (the flag lives in the Makefile, like every other); running `tauri dev` bare skips it and reintroduces the hang.
 
 ## Conventions
 

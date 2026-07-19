@@ -38,7 +38,7 @@ Scaffold into this directory (don't nest a new project inside it — the docs,
   commitlint + husky (prepare: husky)
 - pnpm test:registry must run. It'll report an empty registry; that's correct
   for now — #14 adds the first manifest.
-Then verify `pnpm tauri dev` opens a window and `pnpm lint && pnpm typecheck`
+Then verify `make dev` opens a window and `pnpm lint && pnpm typecheck`
 passes. Open a PR with a Conventional Commit title.
 
 Then stop and check in. Don't start #2 unprompted.

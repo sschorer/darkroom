@@ -69,20 +69,16 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 
 /// Reveals the logs directory in the OS file manager when "Open Logs" is chosen.
 ///
-/// The directory, not the file: it holds the rotated backups too, and it exists
-/// (we create it) even when the engine has never run to write `engine.log` — so
-/// the menu item is never a dead click. All best-effort; a desktop app must not
-/// panic because a file manager wouldn't open.
+/// Shares [`commands::reveal_logs`] with the frontend `open_logs` command (the
+/// cross-platform route now that ADR-019 hides this menu on Windows/Linux).
+/// Best-effort here: a desktop app must not panic because a file manager
+/// wouldn't open, and a menu click has no Result to surface anyway.
 fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: tauri::menu::MenuEvent) {
     if event.id() != OPEN_LOGS_MENU_ID {
         return;
     }
 
-    if let Ok(paths) = Paths::resolve(app) {
-        let logs = paths.logs();
-        let _ = std::fs::create_dir_all(&logs);
-        let _ = open::that_detached(&logs);
-    }
+    let _ = commands::reveal_logs(app);
 }
 
 /// Kills a leaked engine (§8.3). Called at boot and again at exit; both go
@@ -122,6 +118,19 @@ pub fn run() {
             // Before this session can spawn its own engine, clear one a
             // hard-killed previous run left holding the GPU (§8.3).
             reclaim_engine(app.handle());
+
+            // The M2 design owns the window chrome: `decorations: false` plus a
+            // custom titlebar (ADR-019). The default menu (Menu::default, built
+            // above) renders as an in-window bar — Edit/Window/Help — on Windows
+            // and Linux, which would sit as a foreign grey strip directly below
+            // that titlebar. Hide it there. On macOS this is a documented no-op:
+            // the menu is app-wide and lives in the system bar, not the window,
+            // so Help → Open Logs (ADR-015) stays reachable. Best-effort, like
+            // the reclaim above — a window without a menu to hide isn't a reason
+            // to abort the launch.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.hide_menu();
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -130,7 +139,8 @@ pub fn run() {
             commands::start_engine,
             commands::download_model,
             commands::cancel_download,
-            commands::model_status
+            commands::model_status,
+            commands::open_logs
         ])
         .build(tauri::generate_context!());
 
