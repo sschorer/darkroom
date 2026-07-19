@@ -40,6 +40,10 @@ export const ParamSpec = z.object({
   max: z.number().optional(),
 });
 
+/** One entry of a manifest's `params` map. Exported so the params form
+ *  (`params.ts`) reads a param's bounds off the same definition CI validates. */
+export type ParamSpec = z.infer<typeof ParamSpec>;
+
 export const Manifest = z.object({
   id: z.string().regex(/^[a-z0-9-]+$/, "lowercase, digits and hyphens only"),
   /** The human name shown in the UI — the compose-bar model pill (#25) and the
